@@ -1,0 +1,27 @@
+/* /app/globals.css
+ * Tailwind directives + base reset léger pour la direction Google Finance.
+ * Mode clair uniquement en Phase 0.
+ *
+ * Note : la classe utilitaire `bg-card` est générée automatiquement par
+ * Tailwind à partir de `colors.card` dans tailwind.config.ts — pas besoin
+ * de la redéfinir ici, c'est un doublon.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    /* Inter est chargé par next/font dans app/layout.tsx et exposé via
+     * --font-inter ; on l'utilise comme base de fontFamily. */
+    font-family: var(--font-inter), system-ui, -apple-system, BlinkMacSystemFont,
+      "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Couleurs de base : fond gris très pâle, texte gris foncé. */
+  body {
+    @apply bg-neutral-50 text-neutral-900;
+  }
+}

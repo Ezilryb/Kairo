@@ -1,0 +1,48 @@
+# /.github/workflows/ci.yml
+# =============================================================================
+# CI — lint + build sur chaque push et PR vers main.
+# Pas de tests automatisés pour l'instant (Track D/QA, à démarrer en Phase 1) :
+# ce workflow attrape les régressions de linting et de compilation, ce qui est
+# déjà un filet de sécurité décent tant que la suite de tests n'existe pas.
+#
+# Si le repo utilise `master` plutôt que `main` comme branche principale,
+# ajuster la liste `branches:` ci-dessous.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Lint + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        # npm ci lit package-lock.json sans le modifier — plus strict et
+        # reproductible que npm install en CI. Nécessite que package-lock.json
+        # soit committé (il l'est, on l'a généré lors de la bascule Next 16).
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        # next build télécharge Inter via next/font/google au moment du build :
+        # la CI a un accès réseau sortant par défaut, donc ça marche tel quel.
+        # Si jamais on perd cet accès, il faudra passer à next/font/local.
+        run: npm run build

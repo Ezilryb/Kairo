@@ -1,0 +1,180 @@
+================================================================================
+          WHITEPAPER & CAHIER DES CHARGES TECHNIQUES - VERSION 6.0
+              APPLICATION DE JOURNALING & RÉSEAU SOCIAL DE TRADING
+================================================================================
+
+01 - VISION & PROPOSITION DE VALEUR
+--------------------------------------------------------------------------------
+Le projet consiste en une plateforme web de journalisation, d'analyse et de 
+partage de trades. Elle combine un outil d'analytics personnel extrêmement poussé 
+(analysant le comportement et la psychologie) avec une dimension sociale 
+permettant d'observer les stratégies d'autres investisseurs sans nécessité 
+de se connecter à des plateformes financières externes.
+• Le problème résolu : Remplacer les Google Sheets statiques et déconnectés, 
+  tout en protégeant l'identité réelle (pseudo vs Google account), et offrir 
+  une base de données sociale des portefeuilles et stratégies de trading.
+• Ce que l'application NE FAIT PAS : Elle ne gère pas le passage d'ordres, 
+  n'exécute aucune transaction financière et ne fournit aucun conseil en investissement.
+
+
+02 - PERSONAS (UTILISATEURS CIBLES)
+--------------------------------------------------------------------------------
+La plateforme s'adresse à toute personne exposée aux marchés financiers :
+• Les Débutants & Investisseurs Occasionnels : Cas d'usage officiel incluant la 
+  personne lambda qui n'investit qu'une ou deux fois par an via sa banque et 
+  souhaite utiliser la plateforme pour garder une trace propre et analysable.
+• Les Intermédiaires & Investisseurs Réguliers : Ceux qui investissent mensuellement 
+  (DCA, gestion de portefeuille classique).
+• Les Professionnels & Day Traders : Ceux qui tradent quotidiennement et nécessitent 
+  des statistiques pointues (scalping, psychologie, ratios).
+
+
+03 - FONCTIONNALITÉS CŒURS
+--------------------------------------------------------------------------------
+• Journaling avancé (saisie des trades, gestion stricte des entrées/sorties).
+• Analytics financier et comportemental de haute précision (Analytics Engine).
+• Modération et gestion de la confidentialité (Profils Publics vs Privés).
+• Réseau Social (Feed, followers, likes, commentaires sans montants visibles si désiré).
+
+
+04 - MACHINE À ÉTATS DES TRADES (TIMELINE IMMUABLE)
+--------------------------------------------------------------------------------
+Le cycle de vie strict d'un trade :
+1. DRAFT (Brouillon) : Création initiale.
+2. EN COURS (Live) : Une fois publié, le trade est verrouillé. 
+   - Règle de verrouillage absolu : Le prix d'entrée initial ne peut jamais être modifié.
+   - Les Stop Loss (SL) et Take Profit (TP) initiaux sont figés (pour évaluer le respect du plan).
+   - Règles d'entrées/sorties : 
+     * Plusieurs entrées = création obligatoire de plusieurs trades/posts distincts. 
+       Il est interdit d'ajouter du capital à une position publiée.
+     * Sorties partielles : Autorisées sur le même trade (réduction de position).
+   - Exception Scalping : L'utilisateur dispose d'exactement 60 secondes après publication 
+     pour modifier l'entrée, le SL, le TP ou les infos. Après cette minute, 
+     verrouillage définitif.
+3. OUBLIÉ : Bascule automatique après 5 jours calendaires d'inactivité.
+4. RÉACTIVÉ : L'utilisateur confirme que le trade est toujours en cours. Retour à l'état EN COURS.
+5. CLÔTURÉ : Arrêt manuel du trade avant SL/TP, ou atteinte des objectifs.
+6. ARCHIVÉ : Conservation à long terme dans la base de données.
+
+
+05 - MODÈLE DE DONNÉES STRUCTURÉ
+--------------------------------------------------------------------------------
+Architecture relationnelle requise :
+• Tables principales : `Users`, `Trades`, `TradeEvents` (historique immuable des actions 
+  sur le trade), `TradeComments`, `Instruments`, `Followers`, `Reports`, `Notifications`, `AuditLogs`.
+
+Structure stricte de la table `Trade` (extrait) :
+- id (UUID, PK, Obligatoire)
+- user_id (UUID, FK, Indexé, Obligatoire)
+- instrument_id (UUID, FK, Indexé, Obligatoire)
+- direction (Enum: Long/Short, Obligatoire)
+- status (Enum: Draft, Live, Forgotten, Closed, Archived, Obligatoire)
+- entry_price (Decimal, Obligatoire, Non modifiable post-publication)
+- stop_loss / take_profit (Decimal, Optionnel, Historisé)
+- quantity / leverage / capital (Decimal, Obligatoire)
+- risk_percent / fees / slippage (Decimal, Optionnel)
+- opened_at / closed_at (Timestamp UTC)
+- emotion / stress / confidence / plan_followed / mistake_type (Enum/Int, Optionnels)
+- notes (Text, Optionnel)
+
+
+06 - CALCULS FINANCIERS & GESTION DES FRAIS
+--------------------------------------------------------------------------------
+• Gestion des Frais : L'utilisateur sélectionne sa plateforme (ex: Binance, Kraken). 
+  Le système applique un profil de frais estimé (selon l'instrument et le type d'ordre), 
+  avec possibilité pour l'utilisateur de corriger pour indiquer les frais réels.
+• Métriques calculées : PnL brut, PnL net (incluant frais réels/estimés et slippage), 
+  Rendement (%), Rendement en R, Winrate, Profit Factor, Expectancy, Max Drawdown.
+• Métriques d'excursion : MAE (Maximum Adverse Excursion) et MFE (Maximum Favorable Excursion).
+
+
+07 - ANALYTICS ENGINE (MULTIDIMENSIONNEL)
+--------------------------------------------------------------------------------
+Moteur d'analyse permettant de croiser dynamiquement les données :
+• Performance par dimension : Analyse du rendement et du winrate croisés par : 
+  Asset, Session (US/Europe/Asie), Jour, Direction, Setup, Timeframe, Durée du trade.
+  (ex: "BTC → Long → session US → Breakout → 15 min → +0.82R moyen").
+• Analyse Psychologique Intégrée : 
+  - Champs spécifiques de sortie/erreur : FOMO, impatience, peur, euphorie, 
+    revenge trading, surconfiance, fatigue, distraction, raison réelle d'entrée/sortie.
+  - Plan Adherence Score : Fonctionnalité principale calculant un score de respect 
+    du plan sur 100 (Entrée, SL, TP, Risque).
+
+
+08 - MARKET DATA & GRAPHISMES
+--------------------------------------------------------------------------------
+• MarketDataProvider : Couche d'abstraction (Binance, CoinGecko) gérant symbol mapping, 
+  timezones, trous de données, et timestamps UTC.
+• Mode d'affichage UX/UI : Mode Clair natif uniquement.
+• Graphiques (Mode Standard vs Pro) : Le Mode Pro inclut Timeframe auto, zoom, chandeliers, 
+  volume, indicateurs, zones de gain/perte, annotations, superposition des événements 
+  du trade, et capture d'écran du graphique.
+• Trade Replay : Possibilité de rejouer l'évolution des bougies sur la durée exacte du trade.
+
+
+09 - RÉSEAU SOCIAL, PROFILS & CONFIDENTIALITÉ
+--------------------------------------------------------------------------------
+Le Profil (Dashboard) affiche par défaut : 
+Activité, Nombre de trades, Winrate, Rendement en R, Ratio Gain/Perte, Profit Factor, 
+PnL (si public), Taille moyenne des positions (si public), et Graphique d'équité.
+
+Gestion stricte de la confidentialité (Tableau de Visibilité) :
++---------------------------+-------------------+-----------------------------+
+| Donnée                    | Profil Public     | Profil Privé                |
++---------------------------+-------------------+-----------------------------+
+| Pseudo, Bio, Activité     | Visible           | Visible                     |
+| Historique des Trades     | Visible           | Visible                     |
+| Rendement (%, R), Winrate | Visible           | Visible                     |
+| Capital Réel Investi      | Visible           | MASQUÉ                      |
+| Taille des Positions      | Visible           | MASQUÉ                      |
+| PnL Absolu (Monétaire)    | Visible           | MASQUÉ                      |
+| Commentaires chez autrui  | Visible           | MASQUÉ                      |
++---------------------------+-------------------+-----------------------------+
+
+
+10 - SÉCURITÉ, EXPORT & AUTHENTIFICATION
+--------------------------------------------------------------------------------
+• Auth : SSO uniquement (Google, Facebook). Aucun mot de passe local.
+• Sauvegarde & Migration de compte : Export complet des données (trades, historique, 
+  paramètres, profil, événements) vers un stockage externe (sans copier l'identité SSO).
+  Lors d'une restauration causant un conflit d'ID : Le compte existant est placé en 
+  "protection temporaire" avec délai de contestation de 10 jours avant résolution, 
+  évitant toute suppression immédiate accidentelle.
+
+
+11 - RGPD & CONFORMITÉ EUROPÉENNE
+--------------------------------------------------------------------------------
+• Suppression du compte complète accessible depuis les paramètres (avec effacement 
+  des contenus associés).
+• Procédure d'export de données (Portabilité).
+• Définition de la durée de conservation par type de donnée et base légale des traitements.
+• Gestion des cookies (opt-in pour les non essentiels).
+
+
+12 - MODÉRATION & SYSTÈME DE SANCTION (WORKFLOW)
+--------------------------------------------------------------------------------
+• Signalement : Spam, Arnaque, Fausse info, Harcèlement, Usurpation.
+• Workflow de sanction automatisé et manuel :
+  1. Flag automatique : 2 signalements sur un post = masquage du post.
+  2. Flag du compte : 4 posts signalés en 24h = alerte système.
+  3. Visibilité réduite (Shadowban partiel) : Le compte reste actif mais perd sa 
+     visibilité publique suite à l'accumulation de flags.
+  4. Blocage manuel : Suspension ou Bannissement prononcé par l'administration.
+
+
+================================================================================
+                             NOTES & IDÉES INNOVANTES
+                  (Fonctionnalités avancées post-MVP - Non contractuel)
+================================================================================
+1. Proof of Performance (Empreinte Temporelle) : Horodatage immuable des données 
+   originales prouvant qu'un trade n'a pas été créé ou modifié après coup.
+2. AI Bias Detector & Repeat Error Probability : Analyse des données pour détecter 
+   des biais (FOMO, surconfiance) et alerter sur la probabilité de répéter une erreur 
+   (ex: "Après 3 pertes, ton risque augmente de 37%").
+3. Confidence vs Result : Mise en évidence de la corrélation (ou non) entre la 
+   confiance subjective et le résultat réel en R.
+4. Score de Maturité du Trader : Évaluation basée sur la discipline, la gestion du risque 
+   et la psychologie, favorisant un classement qualitatif plutôt que basé sur le PnL.
+5. Profil Public Transparent : Affichage axé sur la pertinence statistique ("Échantillon 
+   faible" vs "Significatif") et la qualité d'exécution globale pour contrer l'effet "vitrine".
+6. Import de trades massifs (CSV/Brokers/Exchanges).
