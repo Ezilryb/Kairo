@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "ESLINT_USE_FLAT_CONFIG=false next lint"
+    "lint": "next lint"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",
