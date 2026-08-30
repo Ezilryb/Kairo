@@ -225,7 +225,7 @@ export default function DashboardPage() {
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
             <p className="mt-1 text-sm text-neutral-500">
-              Bienvenue, Momentum_FR. Voici l'état de ton journal.
+              Bienvenue, Momentum_FR. Voici l&apos;état de ton journal.
             </p>
           </div>
           <div className="flex items-center gap-2">
