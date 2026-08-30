@@ -110,3 +110,32 @@ Points à garder en tête (non bloquants aujourd'hui, à traiter le moment venu)
       toutes deps figées (caret sur devDependencies, versions exactes
       sur les 5 packages runtime critiques) pour stopper le drift
       immédiat, mais c'est une solution temporaire en attendant l'auto-PR.
+
+## Leçons CI/CD
+
+Issues réelles rencontrées pendant le debug du premier pipeline CI en
+août 2026, qui ne sont pas toutes capturées dans l'historique des commits
+et qu'on risque de redécouvrir si on n'a pas la trace.
+
+- **Bug npm `npm/cli#7961`** : `npm install` avec un `node_modules`
+  déjà présent **élague silencieusement** les entrées optionnelles
+  cross-plateforme du lockfile. Sur Windows, les deps WASM de `sharp`
+  (qui tirent `@emnapi/*`) ne sont pas activées → elles disparaissent
+  du lockfile → la CI Linux n'a pas ce qu'il faut et échoue. Règle :
+  toujours supprimer `node_modules` **avant** `package-lock.json`, jamais
+  l'un sans l'autre, avant un `npm install` qui doit produire un lockfile
+  fiable pour la CI cross-plateforme. L'ordre des suppressions compte.
+- **`next lint` n'existe plus en Next 16** (supprimé, pas juste buggé).
+  Le script `lint` dans `package.json` doit appeler `eslint .` directement.
+  Config dans `eslint.config.mjs` (flat config, pas `.eslintrc.json`),
+  qui importe **deux** presets `eslint-config-next` :
+  `core-web-vitals` ET `typescript` (le second s'oublie facilement).
+  Les deux configs doivent être assignées à une variable avant l'export
+  par défaut, sinon ESLint 9 lève un warning `import/no-anonymous-default-export`.
+- **Supabase Auth — URL Configuration** : dans le dashboard Supabase,
+  `Authentication → URL Configuration`, le `Site URL` doit être le vrai
+  domaine Vercel (`https://<app>.vercel.app` ou domaine custom), pas
+  `localhost:3000` qui marche en dev. Les `Redirect URLs` doivent
+  inclure ce même domaine en plus des URLs de dev. Sans ça, les
+  redirections OAuth échouent silencieusement en prod (pas d'erreur
+  explicite côté client, juste un retour sur la page de login).
