@@ -36,11 +36,43 @@ aux phases indiquées, ne pas laisser dériver.
       dashboard à la racine pour l'instant — mais à ne pas oublier en Phase 1.
 
 ## Phase 2 (Journaling & Machine à États)
-- [ ] Ajouter un trigger d'immuabilité sur `capital` post-publication
+
+- [x] Ajouter un trigger d'immuabilité sur `capital` post-publication
       (whitepaper §04 : interdiction d'ajouter du capital à une position
       publiée), calqué sur `enforce_entry_price_immutability`, sans fenêtre
       60s — le capital est verrouillé dès la publication, pas de tolérance
       scalping dessus
+      *(fait — migration `20260831000001_trades_lifecycle.sql` + tests
+      `02_trades_lifecycle_test.sql`, 4 cas pgTAP. Fix `old.status` vs
+      `new.status` : la transition `draft → live` avec augmentation de
+      capital dans le même UPDATE doit passer. Trigger `log_partial_exits`
+      jumeau de `log_sl_tp_changes` pour la traçabilité des sorties
+      partielles. Seed d'instruments : BTCUSDT, ETHUSDT, AAPL, TSLA,
+      EURUSD, GLD.)*
+- [x] Seed d'instruments courants (6 symboles) pour la Tâche B
+      *(fait dans la même migration `02`, `on conflict (symbol, exchange)
+      do nothing` pour idempotence manuelle.)*
+- [ ] **Point B — CRUD brouillon + sélection d'instrument** : page de
+      création/édition d'un trade en `draft`, formulaire avec
+      sélection d'instrument (dropdown sur le seed), `direction`,
+      `entry_price`, `quantity`, `capital`, `instrument_id` obligatoires.
+      Champs persos/psychologie vides à ce stade (optionnels dans le
+      schéma, pas la peine de forcer).
+- [ ] **Point C — Publication + fenêtre scalping** : transition
+      `draft → live`, pose `published_at`, indicateur visuel du compte
+      à rebours 60s, gestion propre du rejet du trigger `entry_price`
+      post-fenêtre.
+- [ ] **Point D — Transitions manuelles + job planifié** : clôture
+      `live`/`forgotten` → `closed`, archivage `closed` → `archived`,
+      réactivation `forgotten` → `live` (pas un statut, une transition —
+      pas d'enum à ajouter). Job Vercel Cron `forgotten` (5 jours
+      d'inactivité), `WHERE` doit matcher l'index `trades_last_activity_idx`
+      (filtré sur `status = 'live'`).
+- [ ] **5ème cas test pgTAP** (à ajouter à `02_trades_lifecycle_test.sql`
+      à l'occasion) : `last_activity_at` doit être rafraîchi même sur
+      la transition `draft → live` (mise à jour inconditionnelle dans
+      `log_sl_tp_changes`). Figer par test pour ne pas dépendre d'une
+      relecture attentive future.
 
 ## Phase 6 (Réseau Social)
 - [ ] Migration : ajouter une contrainte DB sur le format de
