@@ -59,8 +59,14 @@ export function TradeForm({
   mode: "create" | "edit";
 }) {
   const router = useRouter();
+  // Pas de présélection d'instrument par défaut : sur un journal de trading,
+  // l'actif est la donnée la plus structurante de l'entrée, un défaut
+  // silencieux (ex: AAPL via order("symbol")) pollue la base sans qu'on
+  // s'en aperçoive. L'option placeholder disabled dans le <select> +
+  // la validation `!d.instrument_id` déjà en place suffisent à bloquer
+  // la soumission tant que l'utilisateur n'a pas fait un choix explicite.
   const [data, setData] = useState<TradeFormData>(
-    initialTrade ?? { ...EMPTY, instrument_id: instruments[0]?.id ?? "" },
+    initialTrade ?? { ...EMPTY, instrument_id: "" },
   );
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
@@ -116,6 +122,12 @@ export function TradeForm({
         // écrans). Côté DB, la policy RLS update existe pour son propre
         // user_id, mais les triggers métier (enforce_entry_price, etc.)
         // peuvent aussi bloquer selon le statut.
+        //
+        // Le `.eq("user_id", user.id)` est redondant avec la policy RLS
+        // ("auth.uid() = user_id") mais explicite : on ne dépend pas de la
+        // RLS pour distinguer "j'ai pas le droit" de "la ligne n'existe
+        // pas", et on reste aligné sur le pattern défense en profondeur
+        // appliqué dans la page /trades/[id]/edit (cf. commentaire dédié).
         const { data: updated, error: updateError } = await supabase
           .from("trades")
           .update({
@@ -127,6 +139,7 @@ export function TradeForm({
             notes: data.notes || null,
           })
           .eq("id", initialTrade ? (initialTrade as TradeFormData & { id?: string }).id ?? "" : "")
+          .eq("user_id", user.id)
           .select();
         if (updateError) {
           setError(updateError.message);
@@ -171,11 +184,21 @@ export function TradeForm({
             {instruments.length === 0 ? (
               <option value="">Aucun instrument disponible</option>
             ) : (
-              instruments.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.symbol} — {i.name}
+              <>
+                {/* Placeholder disabled : empêche l'utilisateur de re-sélectionner
+                    l'état initial après avoir choisi, et bloque la validation
+                    HTML native (required) tant qu'aucun instrument réel n'est
+                    sélectionné. La validation TS `!d.instrument_id` fait le
+                    reste côté state. */}
+                <option value="" disabled>
+                  — Choisis un instrument —
                 </option>
-              ))
+                {instruments.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.symbol} — {i.name}
+                  </option>
+                ))}
+              </>
             )}
           </select>
           {validation.instrument_id ? (
