@@ -32,6 +32,13 @@
 -- Effet de bord utile : empêche la "republication" d'un trade déjà
 -- live pour reset la fenêtre 60 s (un UPDATE avec status = 'live' sur
 -- une ligne déjà 'live' ne touche rien, l'exception remonte).
+--
+-- GRANT EXECUTE : Postgres accorde EXECUTE à PUBLIC par défaut sur
+-- toute fonction nouvellement créée, donc `authenticated` (le rôle
+-- PostgREST) peut déjà appeler publish_trade sans GRANT explicite.
+-- On ne rajoute pas de GRANT ici — c'est le comportement standard.
+-- Mention pour le futur lecteur : ne pas se demander s'il manque
+-- quelque chose, ce n'est pas le cas.
 -- =============================================================================
 
 create or replace function public.publish_trade(p_trade_id uuid)

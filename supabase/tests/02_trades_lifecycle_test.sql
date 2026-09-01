@@ -234,14 +234,13 @@ select throws_ok(
 -- parce que la résolution de now() peut produire un timestamp
 -- postérieur à t_before dans la même transaction.
 --
--- Note : le RPC est SECURITY INVOKER, il s'exécute avec les droits de
--- l'appelant. Dans le contexte de ce test, le rôle par défaut est
--- 'postgres' (superuser) et auth.uid() est NULL — mais comme on INSERT
--- le trade avec user_id = ...0002 et que le WHERE du RPC filtre sur
--- user_id = auth.uid(), le RPC ne matchera aucune ligne. Si ce test
--- échoue pour cette raison, le directeur devra ajouter un
--- `select set_config('request.jwt.claim.sub', '...0002', true);` avant
--- l'appel RPC pour simuler le user authentifié.
+-- IMPORTANT : le RPC est SECURITY INVOKER, le WHERE filtre sur
+-- user_id = auth.uid(). En contexte pgTAP brut, auth.uid() est NULL
+-- (il lit request.jwt.claim.sub, posé uniquement par PostgREST) et le
+-- RPC ne matche rien. On pose donc explicitement le claim AVANT
+-- l'appel via set_config(..., true) (true = local à la transaction).
+-- Sans ça, ce test donnerait un faux négatif visible — gênant mais
+-- détectable. Pire pour le test 8 (cf. commentaire dédié).
 select lives_ok(
   $$ do $$
      declare
@@ -256,6 +255,14 @@ select lives_ok(
          'long', 100, 1, 100, 'draft'
        )
        returning id into v_trade_id;
+       -- Pose le claim JWT pour que auth.uid() renvoie le user ...0002
+       -- pendant cet appel RPC. Le 3e arg `true` = local à la
+       -- transaction, reset automatique au COMMIT/ROLLBACK.
+       perform set_config(
+         'request.jwt.claim.sub',
+         '00000000-0000-0000-0000-000000000002',
+         true
+       );
        v_t_before := now();
        select * into v_published from public.publish_trade(v_trade_id);
        if v_published.status <> 'live' then
@@ -287,6 +294,16 @@ select lives_ok(
 -- fenêtre 60 s, ce qui violerait le whitepaper §04). Le WHERE du RPC
 -- filtre status = 'draft', donc 0 lignes affectées, l'exception
 -- "Trade introuvable, déjà publié, ou non autorisé" remonte.
+--
+-- Piège détecté en revue : sans set_config du JWT claim, auth.uid()
+-- vaut NULL et `user_id = NULL` ne matche jamais rien — l'exception
+-- remonterait "pour la mauvaise raison". Si quelqu'un retirait un
+-- jour la condition `status = 'draft'` du RPC par erreur
+-- (régression sur l'idempotence), ce test continuerait de passer au
+-- vert sans détecter la régression. Faux vert plus dangereux qu'un
+-- test manquant. D'où le set_config explicite ci-dessous, qui rend
+-- le test authentique : user_id matche bien, seul status = 'draft'
+-- filtre, et c'est ÇA qui doit faire échouer le WHERE.
 select throws_ok(
   $$ do $$
      declare v_trade_id uuid;
@@ -299,6 +316,14 @@ select throws_ok(
          now() - interval '1 hour', now() - interval '1 hour'
        )
        returning id into v_trade_id;
+       -- Idem test 7 : pose le claim pour que user_id matche, et que
+       -- l'exception vienne BIEN du filtre status='draft' (et pas de
+       -- user_id = NULL).
+       perform set_config(
+         'request.jwt.claim.sub',
+         '00000000-0000-0000-0000-000000000002',
+         true
+       );
        perform public.publish_trade(v_trade_id);
      end $$ $$,
   'Trade introuvable%',
