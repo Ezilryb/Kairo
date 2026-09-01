@@ -301,7 +301,16 @@ function StatusBadge({
         },
     closed: {
       label: "Clôturé",
-      classes: "bg-success-subtle text-success",
+      // Convention UI (cf. TODO_TECHNIQUE.md, section "Conventions
+      // UI") : les badges de statut encodent le CYCLE DE VIE du trade,
+      // jamais l'issue financière. Un trade clôturé peut l'être à
+      // perte, le badge ne le dit pas — c'est le PnL affiché ailleurs
+      // sur l'écran qui le porte, en couleur. Teinter `closed` en
+      // success fait croire qu'un trade clôturé est forcément gagnant,
+      // c'est faux. Bug déjà corrigé sur le dashboard mocké en
+      // Phase 0, re-perdu en atterrissant ici — d'où la convention
+      // documentée pour qu'on arrête de le perdre.
+      classes: "bg-neutral-100 text-neutral-700",
     },
     forgotten: {
       label: "Oublié",

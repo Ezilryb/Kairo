@@ -16,6 +16,10 @@
 --      (dans la fenêtre scalping 60 s, whitepaper §04).
 --   6. Live + modif stop_loss à 61 s après publication → doit lever
 --      l'exception `enforce_sl_tp_immutability` (hors fenêtre).
+--   7. publish_trade (RPC) sur draft → OK, pose published_at/opened_at
+--      via now() côté DB (pas via une valeur fournie par le client).
+--   8. publish_trade (RPC) sur trade déjà live → lève exception
+--      (idempotence : pas de "republication" pour reset la fenêtre 60 s).
 --
 -- Fichier séparé de 01_schema_test.sql (même logique que la séparation
 -- des migrations par phase). Chaque test est autosuffisant : setup
@@ -39,7 +43,7 @@ insert into public.users (id, pseudo)
 values ('00000000-0000-0000-0000-000000000002'::uuid, 'test_setup2')
 on conflict (id) do nothing;
 
-select plan(6);
+select plan(8);
 
 -- ============================================================================
 -- Test 1 : draft → live + augmentation capital dans le même UPDATE → OK
@@ -212,6 +216,93 @@ select throws_ok(
      end $$ $$,
   'stop_loss / take_profit sont immuables%',
   'modif stop_loss 61 s après publication doit lever notre exception (fenêtre expirée)'
+);
+
+-- ============================================================================
+-- Test 7 : publish_trade (RPC) sur draft → OK, now() côté DB
+-- ============================================================================
+-- Vérifie que le RPC pose les timestamps via now() côté base, pas via
+-- une valeur fournie par le client. C'est le fix du bug d'horloge
+-- navigateur découvert en Point C/D : si on acceptait published_at
+-- depuis le client, une horloge mal réglée pouvait dater le trade
+-- dans le passé, et la fenêtre 60 s pouvait être considérée comme
+-- expirée dès la publication.
+--
+-- Technique : on INSERT un trade en draft, on capture t_before = now()
+-- juste avant l'appel RPC, on appelle publish_trade, on vérifie que
+-- published_at ET opened_at sont >= à t_before. On utilise >= (pas =)
+-- parce que la résolution de now() peut produire un timestamp
+-- postérieur à t_before dans la même transaction.
+--
+-- Note : le RPC est SECURITY INVOKER, il s'exécute avec les droits de
+-- l'appelant. Dans le contexte de ce test, le rôle par défaut est
+-- 'postgres' (superuser) et auth.uid() est NULL — mais comme on INSERT
+-- le trade avec user_id = ...0002 et que le WHERE du RPC filtre sur
+-- user_id = auth.uid(), le RPC ne matchera aucune ligne. Si ce test
+-- échoue pour cette raison, le directeur devra ajouter un
+-- `select set_config('request.jwt.claim.sub', '...0002', true);` avant
+-- l'appel RPC pour simuler le user authentifié.
+select lives_ok(
+  $$ do $$
+     declare
+       v_trade_id uuid;
+       v_published public.trades;
+       v_t_before timestamptz;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'draft'
+       )
+       returning id into v_trade_id;
+       v_t_before := now();
+       select * into v_published from public.publish_trade(v_trade_id);
+       if v_published.status <> 'live' then
+         raise exception 'status doit être live, trouvé %', v_published.status;
+       end if;
+       if v_published.published_at is null then
+         raise exception 'published_at ne doit pas être NULL';
+       end if;
+       if v_published.opened_at is null then
+         raise exception 'opened_at ne doit pas être NULL';
+       end if;
+       if v_published.published_at < v_t_before then
+         raise exception 'published_at (%) doit être >= à t_before (%)',
+           v_published.published_at, v_t_before;
+       end if;
+       if v_published.opened_at < v_t_before then
+         raise exception 'opened_at (%) doit être >= à t_before (%)',
+           v_published.opened_at, v_t_before;
+       end if;
+     end $$ $$,
+  'publish_trade (RPC) sur draft pose status=live + published_at/opened_at via now() DB'
+);
+
+-- ============================================================================
+-- Test 8 : publish_trade (RPC) sur trade déjà live → lève exception
+-- ============================================================================
+-- Idempotence : un 2e appel sur un trade déjà publié ne doit pas
+-- réécrire published_at (sinon on pourrait "republier" pour reset la
+-- fenêtre 60 s, ce qui violerait le whitepaper §04). Le WHERE du RPC
+-- filtre status = 'draft', donc 0 lignes affectées, l'exception
+-- "Trade introuvable, déjà publié, ou non autorisé" remonte.
+select throws_ok(
+  $$ do $$
+     declare v_trade_id uuid;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'live',
+         now() - interval '1 hour', now() - interval '1 hour'
+       )
+       returning id into v_trade_id;
+       perform public.publish_trade(v_trade_id);
+     end $$ $$,
+  'Trade introuvable%',
+  'publish_trade (RPC) sur trade déjà live doit lever notre exception (pas de republication)'
 );
 
 select * from finish();

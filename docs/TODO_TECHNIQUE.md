@@ -3,6 +3,41 @@
 Items accumulés pendant la Phase 0 / Tâche 2 (schéma DB initial). À traiter
 aux phases indiquées, ne pas laisser dériver.
 
+## Conventions UI (transversales, toutes phases)
+
+Règles à respecter sur **tous** les écrans, présentes pour éviter qu'on
+les perde entre deux commits. Listées en haut du doc exprès.
+
+- **Badges de statut de trade = cycle de vie, jamais issue financière.**
+  Les badges encodent l'état dans la machine à états (draft / live /
+  closed / forgotten / archived), pas le résultat PnL. Un trade clôturé
+  peut l'être à perte — le badge ne le dit pas, c'est le PnL affiché
+  ailleurs sur l'écran (en couleur, dans la section résultat) qui le
+  porte. Teinter `closed` en `success` (vert) fait croire qu'un trade
+  clôturé est forcément gagnant, c'est faux. Teinter `archived` en
+  `success`/`danger` n'a aucun sens. Teinter `forgotten` en `danger`
+  suggérerait à tort un problème. Tous ces statuts sont neutres par
+  défaut (`bg-neutral-100 text-neutral-700`). Seuls les indicateurs
+  financiers (PnL, R-multiple, winrate agrégé) portent la couleur
+  trading. Bug déjà corrigé deux fois dans ce projet (dashboard mocké
+  Phase 0, page détail trade Phase 2 Point C/D) — d'où la règle
+  documentée. **Ne JAMAIS re-teinter un badge de statut en success /
+  danger sauf si on parle explicitement d'un résultat financier.**
+
+- **Tokens sémantiques uniquement via `tailwind.config.ts`.** Pas de
+  classes Tailwind neutres hardcodées pour signifier un état métier
+  (ex: pas de `bg-green-100` pour dire "succès", on utilise
+  `bg-success-subtle`). Le design system centralise la palette, c'est
+  le seul point de vérité. (Règle déjà appliquée — rappel pour
+  éviter le drift.)
+
+- **Pas de `bg-card` qui ne vient pas de `tailwind.config.ts`.** Si
+  `bg-card` ne génère rien dans Tailwind, c'est que la couleur n'est
+  pas déclarée — pas un bug Tailwind, c'est qu'on a oublié de
+  l'ajouter à `theme.extend.colors.card`. Corrigé une fois en
+  Phase 0 / Tâche 3. (Rappel — la couleur `card: "#FFFFFF"` est
+  dans la config, ne pas la redéclarer ailleurs.)
+
 ## Avant tout code d'auth sur le schéma (début Phase 1)
 - [x] `supabase db reset` propre, sans erreur d'ordre ni de syntaxe
       *(fait — projet Supabase réel en place, migration appliquée, test 4 du

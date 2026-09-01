@@ -3,25 +3,39 @@
 // Bouton "Publier" pour un trade en `draft`.
 // Client component utilisé sur la page /trades/[id] quand status = 'draft'.
 //
-// Action effectuée : UPDATE du trade pour passer en 'live' avec
+// Action effectuée : appel du RPC `public.publish_trade(p_trade_id uuid)`
+// (cf. migration 20260901000002_publish_trade_rpc.sql) qui pose côté
+// base les 3 valeurs en un seul UPDATE :
 //   - status = 'live'
-//   - published_at = now() (posée par le client ; Supabase ne met pas de
-//     default sur update, contrairement à insert)
-//   - opened_at = now() (idem)
-// Le tout dans le même UPDATE — un seul aller-retour, les triggers
-// métier (enforce_capital_immutability notamment) évaluent l'état
-// old.status = 'draft' et laissent passer l'augmentation de capital
-// éventuelle au moment de la publication (cf. tests 02 #1).
+//   - published_at = now()  ← côté DB, pas client
+//   - opened_at = now()      ← idem
 //
-// Pourquoi un client component + Supabase direct plutôt qu'une Server
-// Action : cohérence avec le pattern TradeForm (Phase 2 Point B) —
-// même gestion d'erreur, même `.select()` post-mutation pour détecter
-// les blocages RLS silencieux, même UX optimiste. Le `.eq("user_id",
-// user.id)` explicite reste la règle défense en profondeur.
+// Pourquoi un RPC plutôt qu'un `.update()` direct : si l'horloge du
+// navigateur de l'utilisateur est mal réglée (VM, dérive NTP, mauvais
+// fuseau), `new Date().toISOString()` peut être décalée de plusieurs
+// minutes par rapport à `now()` côté DB. Et ce `published_at` est la
+// référence de TOUTE la logique 60 s qu'on vient de construire sur
+// deux migrations (enforce_entry_price_immutability,
+// enforce_sl_tp_immutability). Si published_at est artificiellement
+// daté dans le passé par rapport à l'horloge DB, la fenêtre peut être
+// considérée comme expirée au moment même de la publication, et
+// l'utilisateur ne voit jamais ses 60 secondes — bug qu'on ne verrait
+// qu'en prod. Le RPC pose now() côté base, l'horloge du navigateur
+// n'intervient plus.
 //
-// Après publication réussie, `router.refresh()` côté serveur : la page
-// re-render avec le nouveau statut, le countdown démarre, le composant
-// TradeLiveEdit prend le relais.
+// Le RPC est SECURITY INVOKER (pas SECURITY DEFINER) : pas besoin de
+// contourner la RLS, juste que now() soit évalué dans la base. La
+// policy RLS UPDATE ("auth.uid() = user_id") s'applique via les
+// droits de l'appelant.
+//
+// Effet de bord utile : si le trade est déjà live (ou n'existe pas,
+// ou n'appartient pas au user), le WHERE du RPC ne matche rien et
+// lève une exception explicite. Ça bloque aussi la "republication"
+// d'un trade déjà live pour reset la fenêtre 60 s.
+//
+// Côté UX, on garde le même pattern que les autres formulaires :
+// useTransition + .select()-like via rpc + router.refresh() pour que
+// la page serveur re-render avec le nouveau statut.
 // =============================================================================
 "use client";
 
@@ -60,36 +74,33 @@ export function TradePublishButton({ tradeId }: { tradeId: string }) {
         return;
       }
 
-      // On pose les timestamps côté client. Décalage potentiel de
-      // quelques ms vs now() côté DB (qui sert de référence pour le
-      // trigger 60 s) — négligeable, et on évite un round-trip RPC
-      // supplémentaire. Si on veut la rigueur ultime, on créera un RPC
-      // `publish_trade(trade_id uuid)` qui pose les 3 valeurs en
-      // SECURITY DEFINER, mais c'est du scope Point D+.
-      const nowIso = new Date().toISOString();
-      const { data: updated, error: updateError } = await supabase
-        .from("trades")
-        .update({
-          status: "live",
-          published_at: nowIso,
-          opened_at: nowIso,
-        })
-        .eq("id", tradeId)
-        .eq("user_id", user.id)
-        .select();
+      // RPC SECURITY INVOKER : now() est évalué côté base, pas par le
+      // client. Le user_id dans le WHERE du RPC utilise auth.uid(), donc
+      // on n'a pas besoin de `.eq("user_id", user.id)` ici — c'est le
+      // RPC qui filtre. Voir le commentaire en tête de la migration
+      // 20260901000002_publish_trade_rpc.sql pour le détail.
+      //
+      // `rpc` sur une fonction qui retourne `public.trades` (un objet
+      // unique) renvoie l'objet directement, pas un tableau. Donc on
+      // vérifie `!updated` plutôt que `updated.length === 0`.
+      const { data: updated, error: updateError } = await supabase.rpc(
+        "publish_trade",
+        { p_trade_id: tradeId },
+      );
 
       if (updateError) {
-        // Message du trigger métier (devrait être rare ici car on passe
-        // de draft à live, mais on remonte l'erreur telle quelle par
-        // cohérence avec le pattern des autres formulaires).
+        // Messages possibles (tous en français, déjà lisibles) :
+        //   - "Trade introuvable, déjà publié, ou non autorisé" (RPC)
+        //   - Exception d'un trigger métier (peu probable ici car on
+        //     passe de draft à live, mais on remonte tel quel)
         setError(updateError.message);
         return;
       }
-      if (!updated || updated.length === 0) {
-        // RLS a filtré, ou le trade n'existe plus / n'est plus draft.
-        setError(
-          "Publication refusée (RLS, trade introuvable, ou déjà publié).",
-        );
+      if (!updated) {
+        // Filet de sécurité : rpc n'a pas renvoyé d'erreur mais n'a
+        // pas non plus retourné la ligne. Ne devrait pas arriver (le
+        // RPC lève une exception dans ce cas), mais on reste explicite.
+        setError("Publication refusée (réponse vide du serveur).");
         return;
       }
       // Refresh serveur : la page re-render, le composant détecte le
