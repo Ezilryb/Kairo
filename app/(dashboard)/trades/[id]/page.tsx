@@ -32,6 +32,7 @@ import { Button } from "@/components/ui/Button";
 import { createClient } from "@/lib/supabase/server";
 import { TradePublishButton } from "../_components/trade-publish-button";
 import { TradeLiveEdit } from "../_components/trade-live-edit";
+import { TradeTransitionButton } from "../_components/trade-transition-button";
 
 const WINDOW_MS = 60 * 1000;
 
@@ -184,6 +185,63 @@ export default async function TradeDetailPage({
             </div>
           ) : null}
         </Card>
+
+        {/* Actions : transitions manuelles selon statut. La table des
+            transitions valides est codée dans le RPC transition_trade
+            (migration 03), on n'expose côté UI QUE les boutons qui
+            correspondent à des transitions autorisées — pas la peine
+            de proposer un bouton qui se ferait rejeter par construction.
+            Le RPC reste la garde ultime au cas où. */}
+        {trade.status === "live" ||
+        trade.status === "forgotten" ||
+        trade.status === "closed" ? (
+          <Card>
+            <h2 className="text-sm font-semibold">Actions</h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Transitions manuelles sur ce trade. Chaque action est
+              confirmée avant exécution et tracée dans l&apos;historique
+              du trade (trade_events).
+            </p>
+            <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+              {trade.status === "live" ? (
+                <TradeTransitionButton
+                  tradeId={trade.id}
+                  targetStatus="closed"
+                  label="Clôturer le trade"
+                  confirmMessage="Clôturer ce trade ? Le prix de clôture, les frais et le PnL peuvent encore être édités depuis l'écran de trade (Point D+)."
+                  variant="secondary"
+                />
+              ) : null}
+              {trade.status === "forgotten" ? (
+                <>
+                  <TradeTransitionButton
+                    tradeId={trade.id}
+                    targetStatus="live"
+                    label="Réactiver"
+                    confirmMessage="Réactiver ce trade oublié ? Il repasse en 'live' et son activité est repoussée (last_activity_at mis à now())."
+                    variant="primary"
+                  />
+                  <TradeTransitionButton
+                    tradeId={trade.id}
+                    targetStatus="closed"
+                    label="Clôturer"
+                    confirmMessage="Clôturer ce trade oublié ? Une fois clôturé, il ne sera plus réactivable (closed → archived uniquement)."
+                    variant="secondary"
+                  />
+                </>
+              ) : null}
+              {trade.status === "closed" ? (
+                <TradeTransitionButton
+                  tradeId={trade.id}
+                  targetStatus="archived"
+                  label="Archiver"
+                  confirmMessage="Archiver ce trade clôturé ? L'archivage est terminal : aucune transition depuis 'archived' n'est prévue par le whitepaper §04."
+                  variant="secondary"
+                />
+              ) : null}
+            </div>
+          </Card>
+        ) : null}
 
         {/* Rendu conditionnel selon status */}
         {trade.status === "draft" ? (
