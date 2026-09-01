@@ -20,6 +20,17 @@
 --      via now() côté DB (pas via une valeur fournie par le client).
 --   8. publish_trade (RPC) sur trade déjà live → lève exception
 --      (idempotence : pas de "republication" pour reset la fenêtre 60 s).
+--   9. transition_trade live → closed : OK, closed_at posé, event 'closed'.
+--  10. transition_trade forgotten → live : OK, event 'reactivated'.
+--  11. transition_trade live → archived : lève exception (transition
+--      interdite, faut passer par closed).
+--  12. mark_forgotten_trades sur trade live+old : OK, status='forgotten'
+--      + event 'marked_forgotten'.
+--  13. mark_forgotten_trades sur trade live+recent : 0 affecté (le
+--      WHERE last_activity_at < now() - 5d ne matche pas).
+--  14. mark_forgotten_trades préserve last_activity_at (intégrité :
+--      log_sl_tp_changes ne doit pas écraser la date quand le trade
+--      bascule vers 'forgotten').
 --
 -- Fichier séparé de 01_schema_test.sql (même logique que la séparation
 -- des migrations par phase). Chaque test est autosuffisant : setup
@@ -43,7 +54,7 @@ insert into public.users (id, pseudo)
 values ('00000000-0000-0000-0000-000000000002'::uuid, 'test_setup2')
 on conflict (id) do nothing;
 
-select plan(8);
+select plan(14);
 
 -- ============================================================================
 -- Test 1 : draft → live + augmentation capital dans le même UPDATE → OK
@@ -328,6 +339,271 @@ select throws_ok(
      end $$ $$,
   'Trade introuvable%',
   'publish_trade (RPC) sur trade déjà live doit lever notre exception (pas de republication)'
+);
+
+-- ============================================================================
+-- Test 9 : transition_trade live → closed : OK, closed_at + event
+-- ============================================================================
+-- Clôture manuelle d'un trade publié. Vérifie :
+--   - status passe à 'closed'
+--   - closed_at est posé à now() (non NULL, et >= t_before)
+--   - 1 trade_event de type 'closed' est créé avec old/new status
+select lives_ok(
+  $$ do $$
+     declare
+       v_trade_id uuid;
+       v_result public.trades;
+       v_t_before timestamptz;
+       v_event_count int;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'live',
+         now() - interval '1 hour', now() - interval '1 hour'
+       )
+       returning id into v_trade_id;
+       perform set_config(
+         'request.jwt.claim.sub',
+         '00000000-0000-0000-0000-000000000002',
+         true
+       );
+       v_t_before := now();
+       select * into v_result from public.transition_trade(v_trade_id, 'closed'::public.trade_status);
+       if v_result.status <> 'closed' then
+         raise exception 'status doit être closed, trouvé %', v_result.status;
+       end if;
+       if v_result.closed_at is null then
+         raise exception 'closed_at ne doit pas être NULL';
+       end if;
+       if v_result.closed_at < v_t_before then
+         raise exception 'closed_at (%) doit être >= à t_before (%)',
+           v_result.closed_at, v_t_before;
+       end if;
+       select count(*) into v_event_count
+       from public.trade_events
+       where trade_id = v_trade_id and event_type = 'closed';
+       if v_event_count <> 1 then
+         raise exception 'attendu 1 trade_event closed, trouvé %', v_event_count;
+       end if;
+     end $$ $$,
+  'transition_trade live → closed pose status + closed_at + event closed'
+);
+
+-- ============================================================================
+-- Test 10 : transition_trade forgotten → live : OK, event 'reactivated'
+-- ============================================================================
+-- Réactivation d'un trade oublié. Vérifie :
+--   - status repasse à 'live'
+--   - closed_at reste NULL (on n'a pas transité par closed)
+--   - 1 trade_event de type 'reactivated' est créé
+-- C'est la transition "REACTIVÉ" du whitepaper §04 — pas un statut
+-- à part, juste forgotten qui redevient live.
+select lives_ok(
+  $$ do $$
+     declare
+       v_trade_id uuid;
+       v_result public.trades;
+       v_event_count int;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'forgotten',
+         now() - interval '10 days', now() - interval '10 days'
+       )
+       returning id into v_trade_id;
+       perform set_config(
+         'request.jwt.claim.sub',
+         '00000000-0000-0000-0000-000000000002',
+         true
+       );
+       select * into v_result from public.transition_trade(v_trade_id, 'live'::public.trade_status);
+       if v_result.status <> 'live' then
+         raise exception 'status doit être live, trouvé %', v_result.status;
+       end if;
+       if v_result.closed_at is not null then
+         raise exception 'closed_at doit rester NULL (pas transité par closed), trouvé %',
+           v_result.closed_at;
+       end if;
+       select count(*) into v_event_count
+       from public.trade_events
+       where trade_id = v_trade_id and event_type = 'reactivated';
+       if v_event_count <> 1 then
+         raise exception 'attendu 1 trade_event reactivated, trouvé %', v_event_count;
+       end if;
+     end $$ $$,
+  'transition_trade forgotten → live pose status=live + event reactivated'
+);
+
+-- ============================================================================
+-- Test 11 : transition_trade live → archived : lève exception
+-- ============================================================================
+-- Transition interdite : pour archiver, il faut passer par closed
+-- d'abord (LIVE → CLOSED → ARCHIVED). Le RPC doit refuser
+-- explicitement, pas passer en silence.
+select throws_ok(
+  $$ do $$
+     declare v_trade_id uuid;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'live',
+         now() - interval '1 hour', now() - interval '1 hour'
+       )
+       returning id into v_trade_id;
+       perform set_config(
+         'request.jwt.claim.sub',
+         '00000000-0000-0000-0000-000000000002',
+         true
+       );
+       perform public.transition_trade(v_trade_id, 'archived'::public.trade_status);
+     end $$ $$,
+  'Transition non autorisée%',
+  'transition_trade live → archived doit lever (faut passer par closed)'
+);
+
+-- ============================================================================
+-- Test 12 : mark_forgotten_trades sur trade live+old : OK + event
+-- ============================================================================
+-- Job OUBLIÉ. On INSERT un trade live avec last_activity_at = now() -
+-- 6 jours (> 5 jours, doit être oublié). On appelle le RPC, on
+-- vérifie :
+--   - status passe à 'forgotten'
+--   - 1 trade_event 'marked_forgotten' est créé
+--   - le compteur retourné est 1
+--
+-- Note : SECURITY DEFINER bypasse la RLS, donc pas besoin de
+-- set_config pour auth.uid() ici — le RPC s'exécute avec les droits
+-- du propriétaire de la fonction, peu importe qui appelle.
+select lives_ok(
+  $$ do $$
+     declare
+       v_trade_id uuid;
+       v_count int;
+       v_status public.trade_status;
+       v_event_count int;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at, last_activity_at)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'live',
+         now() - interval '6 days', now() - interval '6 days',
+         now() - interval '6 days'
+       )
+       returning id into v_trade_id;
+       v_count := public.mark_forgotten_trades();
+       if v_count < 1 then
+         raise exception 'mark_forgotten_trades doit retourner au moins 1, retourné %', v_count;
+       end if;
+       select status into v_status from public.trades where id = v_trade_id;
+       if v_status <> 'forgotten' then
+         raise exception 'status doit être forgotten, trouvé %', v_status;
+       end if;
+       select count(*) into v_event_count
+       from public.trade_events
+       where trade_id = v_trade_id and event_type = 'marked_forgotten';
+       if v_event_count <> 1 then
+         raise exception 'attendu 1 trade_event marked_forgotten, trouvé %', v_event_count;
+       end if;
+     end $$ $$,
+  'mark_forgotten_trades bascule les trades live+old (status=forgotten + event)'
+);
+
+-- ============================================================================
+-- Test 13 : mark_forgotten_trades sur trade live+recent : 0 affecté
+-- ============================================================================
+-- Trade live avec last_activity_at = now() - 1 jour (< 5 jours, ne
+-- doit PAS être oublié). On INSERT explicitement le trade, on
+-- appelle le RPC, on vérifie :
+--   - le compteur retourné est 0 (rien à oublier parmi les récents)
+--   - le trade reste en 'live' (n'a pas été basculé)
+-- Si le RPC matchait aussi les récents, le compteur serait > 0 ET
+-- le status du trade serait 'forgotten' → les 2 assertions sautent.
+-- Le test 12 a déjà oublié son propre trade (donc le WHERE ne le
+-- matche plus, status = 'forgotten'), on est dans un état propre.
+select lives_ok(
+  $$ do $$
+     declare
+       v_trade_id uuid;
+       v_count int;
+       v_status public.trade_status;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at, last_activity_at)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'live',
+         now() - interval '1 day', now() - interval '1 day',
+         now() - interval '1 day'
+       )
+       returning id into v_trade_id;
+       v_count := public.mark_forgotten_trades();
+       if v_count <> 0 then
+         raise exception 'compteur doit être 0 (aucun trade à oublier), retourné %', v_count;
+       end if;
+       select status into v_status from public.trades where id = v_trade_id;
+       if v_status <> 'live' then
+         raise exception 'trade live+recent ne doit pas être oublié, status = %', v_status;
+       end if;
+     end $$ $$,
+  'mark_forgotten_trades sur trade live+recent : compteur 0 et status reste live'
+);
+
+-- ============================================================================
+-- Test 14 : mark_forgotten_trades préserve last_activity_at (intégrité)
+-- ============================================================================
+-- Bug identifié en revue du Point D : la version précédente de
+-- log_sl_tp_changes (Phase 0) posait `new.last_activity_at := now()`
+-- inconditionnellement, ce qui écrasait silencieusement la date de
+-- dernière activité réelle au moment même où le job constatait
+-- l'inactivité. La valeur de last_activity_at pour les trades
+-- basculés était définitivement perdue (whitepaper §07, AI Bias
+-- Detector).
+--
+-- Fix : log_sl_tp_changes ne rafraîchit last_activity_at que si
+-- new.status <> 'forgotten'. On vérifie ici que le fix tient.
+--
+-- On INSERT un trade live+old (last_activity_at = now() - 6j), on
+-- capture cette valeur, on appelle mark_forgotten_trades, on relit
+-- last_activity_at et on vérifie qu'il n'a pas bougé. Tolérance
+-- ±1s pour la résolution de now() dans la même transaction
+-- (vraisemblablement 0s en pratique, mais on reste défensif).
+select lives_ok(
+  $$ do $$
+     declare
+       v_trade_id uuid;
+       v_last_activity_before timestamptz;
+       v_last_activity_after timestamptz;
+       v_diff_seconds numeric;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at, last_activity_at)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'live',
+         now() - interval '6 days', now() - interval '6 days',
+         now() - interval '6 days'
+       )
+       returning id, last_activity_at into v_trade_id, v_last_activity_before;
+       perform public.mark_forgotten_trades();
+       select last_activity_at into v_last_activity_after
+       from public.trades where id = v_trade_id;
+       if v_last_activity_after is null then
+         raise exception 'last_activity_at ne doit pas être NULL après mark_forgotten_trades';
+       end if;
+       v_diff_seconds := abs(extract(epoch from (v_last_activity_after - v_last_activity_before)));
+       if v_diff_seconds > 1.0 then
+         raise exception 'last_activity_at a bougé de % secondes (avant=%, après=%) — log_sl_tp_changes a écrasé la date d''inactivité',
+           v_diff_seconds, v_last_activity_before, v_last_activity_after;
+       end if;
+     end $$ $$,
+  'mark_forgotten_trades préserve last_activity_at (pas d''écrasement silencieux par log_sl_tp_changes)'
 );
 
 select * from finish();
