@@ -12,6 +12,10 @@
 --      un trade_event partial_exit.
 --   4. Live + update qui ne touche ni capital ni quantity (ex: notes)
 --      → doit réussir, sans event partial_exit.
+--   5. Live + modif stop_loss à 59 s après publication → doit réussir
+--      (dans la fenêtre scalping 60 s, whitepaper §04).
+--   6. Live + modif stop_loss à 61 s après publication → doit lever
+--      l'exception `enforce_sl_tp_immutability` (hors fenêtre).
 --
 -- Fichier séparé de 01_schema_test.sql (même logique que la séparation
 -- des migrations par phase). Chaque test est autosuffisant : setup
@@ -35,7 +39,7 @@ insert into public.users (id, pseudo)
 values ('00000000-0000-0000-0000-000000000002'::uuid, 'test_setup2')
 on conflict (id) do nothing;
 
-select plan(4);
+select plan(6);
 
 -- ============================================================================
 -- Test 1 : draft → live + augmentation capital dans le même UPDATE → OK
@@ -151,6 +155,63 @@ select lives_ok(
        end if;
      end $$ $$,
   'live + update notes-only doit réussir SANS créer de trade_event'
+);
+
+-- ============================================================================
+-- Test 5 : live + modif stop_loss à 59 s après publication → OK
+-- ============================================================================
+-- Cas d'usage normal : le user publie un trade, ajuste son SL dans la
+-- fenêtre scalping (whitepaper §04). On INSERT directement avec
+-- published_at = now() - 59 s (dans la fenêtre) puis on UPDATE SL.
+-- Le trigger évalue : T > (T-59s) + 60s = T > T+1s = false → la modif
+-- doit passer. Convention identique aux tests 3.2 et 3.3 de
+-- 01_schema_test.sql sur entry_price.
+-- Note : take_profit suit la même règle (OR dans le trigger), pas de
+-- test séparé pour TP — un test par branche du OR serait de la
+-- sur-ingénierie pour deux conditions strictement symétriques.
+select lives_ok(
+  $$ do $$
+     declare v_trade_id uuid;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at, stop_loss)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'live',
+         now() - interval '59 seconds', now() - interval '59 seconds',
+         95
+       )
+       returning id into v_trade_id;
+       update public.trades set stop_loss = 90 where id = v_trade_id;
+     end $$ $$,
+  'modif stop_loss 59 s après publication passe (fenêtre scalping 60 s incluse)'
+);
+
+-- ============================================================================
+-- Test 6 : live + modif stop_loss à 61 s après publication → lève exception
+-- ============================================================================
+-- published_at = now() - 61 s. Le trigger évalue :
+-- T > (T-61s) + 60s = T > T-1s = true → la modif est refusée.
+-- Message d'exception : 'stop_loss / take_profit sont immuables...'
+-- (cf. enforce_sl_tp_immutability dans la migration
+-- 20260901000001_trades_sl_tp_window.sql).
+select throws_ok(
+  $$ do $$
+     declare v_trade_id uuid;
+     begin
+       insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at, stop_loss)
+       values (
+         '00000000-0000-0000-0000-000000000002'::uuid,
+         (select id from public.instruments where symbol = 'TESTUSD2'),
+         'long', 100, 1, 100, 'live',
+         now() - interval '61 seconds', now() - interval '61 seconds',
+         95
+       )
+       returning id into v_trade_id;
+       update public.trades set stop_loss = 90 where id = v_trade_id;
+     end $$ $$,
+  'stop_loss / take_profit sont immuables%',
+  'modif stop_loss 61 s après publication doit lever notre exception (fenêtre expirée)'
 );
 
 select * from finish();
