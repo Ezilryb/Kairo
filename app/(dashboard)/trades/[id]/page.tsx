@@ -290,26 +290,13 @@ export default async function TradeDetailPage({
           </Card>
         ) : null}
 
-        {trade.status !== "draft" && trade.status !== "live" ? (
+        {trade.status === "archived" ? (
           <Card>
-            <h2 className="text-sm font-semibold">
-              Trade en statut{" "}
-              <code className="rounded bg-neutral-100 px-1 py-0.5 text-[11px]">
-                {trade.status}
-              </code>
-            </h2>
+            <h2 className="text-sm font-semibold">Trade archivé</h2>
             <p className="mt-1 text-xs text-neutral-500">
-              Cet état (
-              {trade.status === "closed"
-                ? "clôturé"
-                : trade.status === "forgotten"
-                  ? "oublié (5 jours d'inactivité)"
-                  : trade.status === "archived"
-                    ? "archivé"
-                    : "inconnu"}
-              ) aura son écran de gestion dédié en Phase 2 Point D
-              (transitions manuelles + job planifié). Pour l&apos;instant,
-              l&apos;affichage est en lecture seule.
+              Ce trade est archivé — un état terminal (whitepaper §04) :
+              aucune transition n&apos;est prévue depuis ce statut.
+              L&apos;affichage reste en lecture seule.
             </p>
           </Card>
         ) : null}
