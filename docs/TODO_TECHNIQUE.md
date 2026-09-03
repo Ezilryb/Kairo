@@ -206,3 +206,19 @@ et qu'on risque de redécouvrir si on n'a pas la trace.
   inclure ce même domaine en plus des URLs de dev. Sans ça, les
   redirections OAuth échouent silencieusement en prod (pas d'erreur
   explicite côté client, juste un retour sur la page de login).
+
+- **Tooling CLI / Docker côté directeur — ne jamais supposer** : les
+  commandes de type `supabase db reset`, `supabase test db`,
+  `supabase db push`, etc. supposent soit une stack locale Docker
+  (que le sandbox agent n'a pas, et que la machine du directeur
+  n'a pas confirmée), soit un `supabase link` préalable vers un
+  projet distant (jamais vérifié). Réflexe : ne jamais recommander
+  une commande CLI dans les instructions de test/déploiement sans
+  l'avoir vu exécutée au moins une fois dans une sortie de terminal
+  du directeur. Voie par défaut fiable et confirmée : dashboard
+  Supabase → SQL Editor → coller le SQL (cf. ce qui a été fait pour
+  la toute première migration en Phase 0, avec succès). Si le
+  directeur confirme un jour avoir le CLI lié au projet, les
+  commandes `supabase db push` + `supabase test db` deviennent
+  utilisables, mais c'est à vérifier avant de les présenter comme
+  la voie standard, pas après.
