@@ -33,6 +33,7 @@ import { createClient } from "@/lib/supabase/server";
 import { TradePublishButton } from "../_components/trade-publish-button";
 import { TradeLiveEdit } from "../_components/trade-live-edit";
 import { TradeTransitionButton } from "../_components/trade-transition-button";
+import { TradeEventsTimeline } from "@/components/trades/trade-events-timeline";
 
 const WINDOW_MS = 60 * 1000;
 
@@ -78,7 +79,7 @@ export default async function TradeDetailPage({
   // pas de filtre RLS à appliquer côté serveur.
   const { data: instrument } = await supabase
     .from("instruments")
-    .select("symbol, name")
+    .select("symbol, name, asset_class")
     .eq("id", trade.instrument_id)
     .maybeSingle();
 
@@ -186,6 +187,12 @@ export default async function TradeDetailPage({
           ) : null}
         </Card>
 
+        {/* Preuve de performance (Phase 9) — timeline immuable des
+            trade_events. Lecture pure, aucune migration. Affichée pour
+            TOUS les statuts (même un brouillon a au minimum un event
+            'created') — c'est ce qui rend la preuve universelle. */}
+        <TradeEventsTimeline tradeId={trade.id} />
+
         {/* Actions : transitions manuelles selon statut. La table des
             transitions valides est codée dans le RPC transition_trade
             (migration 03), on n'expose côté UI QUE les boutons qui
@@ -210,6 +217,7 @@ export default async function TradeDetailPage({
                   label="Clôturer le trade"
                   confirmMessage="Clôturer ce trade ? Le prix de clôture, les frais et le PnL peuvent encore être édités depuis l'écran de trade (Point D+)."
                   variant="secondary"
+                  assetClass={instrument?.asset_class}
                 />
               ) : null}
               {trade.status === "forgotten" ? (
@@ -227,6 +235,7 @@ export default async function TradeDetailPage({
                     label="Clôturer"
                     confirmMessage="Clôturer ce trade oublié ? Une fois clôturé, il ne sera plus réactivable (closed → archived uniquement)."
                     variant="secondary"
+                    assetClass={instrument?.asset_class}
                   />
                 </>
               ) : null}

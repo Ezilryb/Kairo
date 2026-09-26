@@ -33,6 +33,21 @@
 // rejeter par construction. Le RPC reste la garde ultime au cas
 // où (si quelqu'un ajoute un bouton "transitionner depuis n'importe
 // où" sans vérifier, le RPC lèvera "Transition non autorisée").
+//
+// CHAÎNAGE AUTOMATIQUE POST-CLÔTURE (Phase 5, §08 point 4) :
+//   Si la transition est vers 'closed' ET l'asset_class de l'instrument
+//   est 'crypto' (passé en prop), on déclenche automatiquement le calcul
+//   + persistance MAE/MFE via POST /api/trades/[id]/mae-mfe. Fire-and-
+//   forget (pas await) : on ne bloque pas l'UX de la transition (déjà
+//   ressentie par l'utilisateur comme "instantanée"). Le user peut
+//   naviguer vers /trades/[id]/chart et voir mae/mfe après quelques
+//   secondes. Si le calcul échoue, on log (les logs serveur) et le
+//   user peut toujours cliquer le bouton manuel sur la page chart.
+//
+// Garde crypto-only des deux côtés (cf. brief §08) :
+//   - Côté client (ce bouton) : on skippe l'appel si assetClass !== 'crypto'
+//   - Côté serveur (/api/trades/[id]/mae-mfe) : revérifie asset_class et
+//     retourne {skipped: true, reason: 'non-crypto'} (cf. endpoint)
 // =============================================================================
 "use client";
 
@@ -54,12 +69,21 @@ export function TradeTransitionButton({
   label,
   confirmMessage,
   variant = "secondary",
+  assetClass,
 }: {
   tradeId: string;
   targetStatus: TransitionTarget;
   label: string;
   confirmMessage: string;
   variant?: "primary" | "secondary";
+  /**
+   * Optionnel. Si fourni, et que la transition est vers 'closed', et
+   * que assetClass === 'crypto', on déclenche automatiquement le calcul
+   * MAE/MFE via /api/trades/[id]/mae-mfe. Si assetClass !== 'crypto',
+   * on skippe (les non-crypto n'ont pas de graphique, donc pas de
+   * MAE/MFE).
+   */
+  assetClass?: string;
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
@@ -106,7 +130,7 @@ export function TradeTransitionButton({
       }
       if (!updated) {
         // Filet de sécurité : rpc n'a pas renvoyé d'erreur mais n'a
-        // pas non plus retourné la ligne. Ne devrait pas arriver (le
+        // pas non plus renvoyé la ligne. Ne devrait pas arriver (le
         // RPC lève une exception dans ce cas), mais on reste explicite.
         setError("Transition refusée (réponse vide du serveur).");
         return;
@@ -116,6 +140,24 @@ export function TradeTransitionButton({
       // changent selon le statut). Pas de router.push (on reste sur
       // la même URL, on ne perd pas le contexte).
       router.refresh();
+
+      // Chaînage automatique post-clôture (Phase 5, §08 point 4) :
+      // si transition vers 'closed' et asset crypto, fire-and-forget
+      // le calcul + persistance MAE/MFE. L'endpoint revérifie crypto
+      // côté serveur (défense en profondeur) et skippe proprement si
+      // non. Le user peut voir mae/mfe sur /trades/[id]/chart après
+      // quelques secondes. Pas d'await : on ne bloque pas l'UX de la
+      // transition.
+      if (targetStatus === "closed" && assetClass === "crypto") {
+        fetch(`/api/trades/${tradeId}/mae-mfe`, { method: "POST" }).catch(
+          (err) => {
+            console.error(
+              "[TradeTransitionButton] MAE/MFE fire-and-forget failed:",
+              err
+            );
+          }
+        );
+      }
     });
   };
 

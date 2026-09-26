@@ -222,3 +222,228 @@ et qu'on risque de redécouvrir si on n'a pas la trace.
   commandes `supabase db push` + `supabase test db` deviennent
   utilisables, mais c'est à vérifier avant de les présenter comme
   la voie standard, pas après.
+
+## Dette technique — Erreurs lint préexistantes (hors scope retransmission)
+
+Erreurs ESLint détectées au `npm run lint` de la Phase 5, **non
+introduites par la phase** (les fichiers Phase 5 sont à 0 erreur
+après corrections) mais non corrigées dans la session pour ne pas
+mélanger les scopes. À traiter dans un round dédié après la clôture
+de la Phase 5 — l'idée est de ne pas les perdre de vue juste parce
+qu'elles sont "préexistantes" :
+
+- **`app/(dashboard)/trades/[id]/page.tsx:94`** — `react-hooks/purity`
+  : `Date.now()` est une fonction impure appelée pendant le render d'un
+  composant serveur. La nouvelle règle (React 19 / eslint-plugin-react-
+  hooks ≥ 5) la bloque. Le code en question calcule `nowMs` pour
+  déterminer si on est dans la fenêtre SL/TP de 60s post-publication.
+  Fix : passer en composant client et utiliser `useState` + `useEffect`
+  pour `nowMs`, ou bien pré-calculer côté serveur dans le loader.
+- **`app/(dashboard)/trades/_components/trade-form.tsx:163, 164, 277`**
+  — `react/no-unescaped-entities` : 3 apostrophes `'` non échappées
+  dans du JSX texte. Fix cosmétique : remplacer par `&apos;` ou
+  utiliser des guillemets courbes typographiques `’`.
+- **`app/(dashboard)/profile/page.tsx:49`** — `@next/next/no-img-element`
+  (warning) : `<img>` brut pour l'avatar OAuth. **Tolérance déjà
+  documentée** plus haut dans ce fichier (cf. section "Points à garder
+  en tête"), pas un bug — à traiter uniquement si on switch vers
+  `next/image` (whitelist des domaines Google/Facebook dans
+  `next.config.js`).
+
+Réflexe à garder pour les futures sessions : quand on fait un
+`npm run lint` complet en fin de phase, lister **séparément** les
+erreurs de mon fait vs les préexistantes dans le récap, plutôt que
+de dire "0 erreur sur mes fichiers" sans dire combien il en reste
+ailleurs. Le chef veut le delta complet, pas un booléen.
+
+## Leçons pgTAP / Postgres
+
+Pièges réels rencontrés pendant le debug des tests Phase 5 / Phase 6,
+qui ne sont pas tous capturés dans la mémoire collective et qu'on
+risque de redécouvrir si on n'a pas la trace.
+
+- **Un bloc DO est void et ne peut PAS faire `RETURN <valeur>`**
+  (Phase 6, test 06, 12 tests). Documentation PostgreSQL section DO :
+  un bloc `do $$ ... $$` est une fonction sans paramètres qui retourne
+  void. `RETURN <expression>;` lève `RETURN cannot have a parameter in
+  function returning void`. Pour tester setup + assertion sur une
+  valeur dans un même test, le pattern est `lives_ok` avec l'assertion
+  faite en interne via `IF <condition_inverse> THEN RAISE EXCEPTION
+  '...'; END IF;` — PAS `is()`/`ok()` sur un retour qui n'existe pas.
+  Référence : `03_financial_calcs_test.sql` / `04_analytics_test.sql`
+  l'utilisent déjà. `is()` et `ok()` restent valables pour comparer une
+  valeur produite par un SELECT direct sans setup préalable.
+
+- **RLS WITH CHECK vs USING — deux mécanismes opposés** (Phase 6, test
+  7 — première cible DELETE bloqué par RLS pure sans trigger). Distinction
+  capturée pour la première fois par un test du projet :
+  - **INSERT/UPDATE avec WITH CHECK** : si la nouvelle ligne ne satisfait
+    pas la condition, Postgres lève explicitement `new row violates row-
+    level security policy`. C'est une exception attrapable par
+    `throws_ok`.
+  - **SELECT/UPDATE/DELETE avec USING** : la clause USING filtre
+    silencieusement les lignes visibles (comme un WHERE implicite). Une
+    ligne qui ne passe pas USING n'est simplement pas sélectionnée →
+    0 ligne affectée, **AUCUNE exception levée**. Le DELETE ressemble
+    à un no-op, exactement comme si l'id demandé n'existait pas. Pour
+    tester, il faut `lives_ok` qui vérifie l'**absence d'effet** (la
+    ligne est toujours là), pas `throws_ok` qui attend une exception.
+  - Référence qui peut confondre : `01_schema_test.sql` tests 3.7/3.8
+    lèvent bien sur UPDATE/DELETE via `forbid_trade_events_mutation`,
+    mais c'est un **trigger explicite** qui fait `RAISE EXCEPTION`, pas
+    la RLS elle-même. La RLS pure reste silencieuse.
+  - Ce piège reviendra probablement si followers/unfollow ou d'autres
+    suppressions RLS-only sont testées plus tard (et c'est exactement
+    le pattern de `likes` : INSERT → WITH CHECK, SELECT → USING,
+    DELETE → USING).
+
+- **Cleanup obligatoire pour les agrégats non scopés** (Phase 7, test
+  5 — bug raté deux fois avant d'être vu). Distinction piégeuse entre
+  deux formes d'assertion dans un test pgTAP :
+  - **Vérification scopée** : `SELECT ... WHERE id = v_trade_id` — un
+    id précis, créé dans le test, donc isolé des résidus des tests
+    précédents. Pas de cleanup nécessaire.
+  - **Agrégat non scopé** : `SELECT count(*) FROM public.trades WHERE
+    user_id = X AND <état>` — l'agrégat ramasse tout l'historique de X,
+    y compris les résidus des tests précédents qui partagent le même
+    user. Sans cleanup explicite en tête de bloc, l'assertion compare
+    un état "ce test + héritage" à un état "ce test seul", ce qui
+    déclenche un faux positif.
+  - Le commentaire "le test est autosuffisant : X n'a créé aucun
+    trade dans ce test" est trompeur : un count(*) WHERE user_id=X
+    n'est pas scopé sur les creations du test. Il faut cleanup en tête
+    du bloc, pas juste self-discipline de création.
+  - Pattern de cleanup (réutilisé Phase 7 tests 5 et 7) :
+    ```sql
+    delete from public.reports
+      where trade_id in (select id from public.trades where user_id = v_user_b)
+         or comment_id in (select id from public.trade_comments where user_id = v_user_b);
+    delete from public.trades where user_id = v_user_b;
+    ```
+    Ordre critique : reports d'abord, sinon ON DELETE SET NULL sur
+    `reports.trade_id`/`reports.comment_id` est implémenté comme UPDATE
+    interne, soumis au CHECK `(trade_id is not null or comment_id is
+    not null or reported_user_id is not null)` → exception. Lesson
+    précédente (CHECK sur ON DELETE SET NULL) vue en Phase 6, mais ici
+    elle se rappelle à nous dans un nouveau contexte (cleanup de tests
+    et non pas migration).
+  - Vérifier la couverture du WHERE avant d'appliquer : compter les
+    reports via `trade_id` ET `comment_id` pointant sur les posts du
+    user ciblé, sur tous les tests précédents — pas juste ceux du test
+    courant.
+
+- **SECURITY DEFINER + IF NULL = pas de filet RLS — utiliser IS DISTINCT
+  FROM, jamais `<>` (Phase 8, test 9 critique).** Distinction piégeuse
+  qui combine 3 mécanismes PostgreSQL/Supabase :
+  - **`<>` suit la logique 3 valeurs SQL** : `uuid <> NULL` = NULL
+    (pas FALSE, pas TRUE). Un `IF NULL THEN raise` en PL/pgSQL ne lève
+    pas (IF exige TRUE, NULL ≡ FALSE).
+  - **`auth.uid()` retourne NULL sans JWT** : c'est un wrapper
+    `nullif(current_setting('request.jwt.claim.sub', true), '')::uuid`.
+    Sans header Authorization (rôle anon) → current_setting → NULL →
+    nullif → NULL → ::uuid → NULL.
+  - **SECURITY DEFINER bypasse TOUTES les policies RLS** : la fonction
+    tourne avec les droits du proprio (postgres, BYPASSRLS = 1). Aucun
+    filet de sécurité sur les tables accédées. Le check cassé est la
+    SEULE protection.
+  - Combinaison : `IF p_user_id <> auth.uid() THEN raise END IF;` dans
+    une fonction SECURITY DEFINER sans REVOKE EXECUTE FROM PUBLIC = un
+    appel REST anon + p_user_id = uuid de victime = export intégral
+    contournant le masquage. L'UUID n'est pas secret (réseau social,
+    visible dans le feed).
+  - **Fix : `IF p_user_id IS DISTINCT FROM auth.uid() THEN raise`**.
+    `uuid IS DISTINCT FROM NULL` = TRUE → raise correct.
+  - **Couverture test obligatoire** : un test avec auth.uid() = NULL
+    (via `perform set_config('request.jwt.claim.sub', '', true);`)
+    pour transformer une fuite silencieuse en exception observable par
+    `throws_ok`. Le test traditionnel "deux UUIDs non-null" marche
+    identiquement avec `<>` et `IS DISTINCT FROM` → n'attrape jamais
+    le bug.
+  - **Défense en profondeur complémentaire** : `REVOKE EXECUTE ON
+    FUNCTION public.export_user_data(uuid) FROM PUBLIC; GRANT EXECUTE
+    ON FUNCTION public.export_user_data(uuid) TO authenticated;`
+    (cohérent avec `mark_forgotten_trades` Phase 2). Pas strictement
+    requis une fois `IS DISTINCT FROM` en place, mais bloque l'appel
+    anon au niveau GRANT avant même qu'il atteigne le check SQL.
+    À intégrer dans une migration dédiée (pas lié au calendrier
+    Phase 8 — le bug critique Phase 8 est clos côté revue depuis
+    plusieurs tours).
+
+- **Policies RLS oubliées lors d'un update d'une policy sœur** (Phase 9,
+  discovery pendant l'audit composant PoP). Quand on durcit une policy
+  SELECT sur une table (ex : trades en Phase 7 — migration 018, ajout
+  de `not moderation_hidden` et `owner.account_status = 'active'`),
+  il faut **systématiquement vérifier** les policies des tables liées
+  qui dépendent du même predicate via EXISTS. Le trou : la policy
+  `trade_events` SELECT (migration 0001) faisait `t.is_public OR
+  t.user_id = auth.uid()` via EXISTS sur trades. Phase 7 a durci
+  trades mais n'a pas touché trade_events → un user authentifié pouvait
+  lire les events d'un trade public masqué par modération ou dont le
+  propriétaire était shadowbanned, contournant la garantie Phase 7
+  via un simple `GET /rest/v1/trade_events?trade_id=eq.<uuid>`. Le fix
+  a été appliqué en migration 020 (`20260903000020_trade_events_policy_align_phase7.sql`) :
+  mirror strict de la policy trades Phase 7, mêmes 3 conditions. Tests
+  pgTAP : `supabase/tests/09_trade_events_policy_test.sql` (6 assertions,
+  5 cas de la table de vérité + 1 régression policy INSERTION).
+  - **Leçon à généraliser** : à chaque `CREATE OR REPLACE` / `DROP POLICY
+    + CREATE POLICY` sur une table, grep toutes les autres tables qui
+    ont une policy référençant cette table via EXISTS, et mettre à jour
+    en parallèle. Évite les trous d'évolution policy-sœurs.
+
+- **Couverture asymétrique des branches policy** (Phase 9 round 3, dette
+  comblée). Leçon : quand une policy a plusieurs conditions dans un AND,
+  il faut **un test par branche** pour détecter un refactor qui retire
+  l'une d'elles. Le test 6 du fichier `09_trade_events_policy_test.sql`
+  vérifiait qu'un non-propriétaire (A) ne peut pas insérer un event
+  sur le trade d'un autre (B) **en posant user_id = A** — branche 2 de
+  la policy INSERT KO. Mais branche 1 (`auth.uid() = user_id`)
+  n'était jamais exercée : un proprio (B) qui aurait inséré un event
+  avec user_id = quelqu'un d'autre sur SON propre trade aurait
+  corrompu l'attribution de l'historique immuable (le Proof of
+  Performance vend cet historique comme preuve d'intégrité). Sans test
+  dédié à cette branche, retirer `auth.uid() = user_id` de la policy
+  passait inaperçu. Fix : ajout d'un test 7 dans le même fichier
+  (B insère sur trade de B avec user_id = A → throws). Leçon
+  généralisable : pour toute policy multi-condition, ajouter un test
+  par condition indépendante, pas seulement un test du comportement
+  global.
+
+- **Dette Phase 9 — masquage des champs sensibles dans le PoP public**
+  (à traiter avant toute UI permettant à un non-propriétaire d'atteindre
+  `TradeEventsTimeline` ou d'appeler `trade_events` en lecture publique).
+  Constat : même après alignement Phase 7 de la policy `trade_events`
+  (migration 020), le composant `TradeEventsTimeline` affiche dans ses
+  diffs les clés JSONB suivantes, qui sont des données sensibles au sens
+  whitepaper §09 (Taille des Positions, Capital Réel Investi, données
+  psycho) :
+    - `quantity`, `fees`, `slippage` (montants)
+    - `entry_price`, `stop_loss`, `take_profit` (stratégie)
+    - `notes`, `emotion`, `stress`, `confidence`, `plan_followed`,
+      `mistake_type` (données psycho)
+  Le composant PoP est aujourd'hui **owner-only** (`.eq("user_id", user.id)`
+  sur les 2 fetches, Phase 9 round 2) — ce qui neutralise le risque
+  tant qu'aucune UI de consultation publique n'existe. Mais le jour où
+  un PoP public est cadré (lien depuis feed, profil public, etc.), il
+  faudra :
+    - Soit **créer une fonction SQL `trade_visible_event_values`**
+      analogue aux `trade_visible_capital/quantity/pnl_absolute` de
+      la migration 013 (privacy_masking Phase 6), qui retourne un JSONB
+      redacté selon `users.is_public` + `account_status` + (évent.)
+      `followers`. Le trigger `log_sl_tp_changes` (migration 0001) et
+      `log_entry_price_changes` (migration 006) INSERT en JSONB brut
+      → il faudrait soit modifier ces triggers pour passer par la
+      fonction, soit post-process dans une RPC de lecture.
+    - Soit **redact côté composant** (filtre post-fetch des clés
+      sensibles). Plus simple à court terme, mais la donnée transite
+      quand même par le navigateur du viewer — pas une vraie sécurité,
+      juste de la rétention visuelle (pattern explicitement rejeté par
+      le chef Phase 9, ce qui rend cette option non viable pour le
+      PoP public).
+  Déclencheur explicite : **avant toute UI permettant à un non-propriétaire
+  d'atteindre `TradeEventsTimeline` ou d'appeler `trade_events` en lecture
+  publique**. D'ici là, ne PAS retirer le filtre owner-only du composant.
+  - Cette convention `IS DISTINCT FROM` au lieu de `<>` est répétée
+    dans l'en-tête de chaque fichier de tests depuis la Phase 6. Elle
+    n'avait jamais été appliquée au code de production lui-même,
+    seulement aux assertions. Leçon à étendre : appliquer aussi
+    systématiquement aux checks SQL de production.

@@ -1,17 +1,31 @@
 // /app/(dashboard)/profile/page.tsx
 // =============================================================================
-// Page de profil — affichage du pseudo + toggle de visibilité (public/privé).
+// Page de profil — affichage du pseudo + toggle de visibilité (public/privé)
+// + zone de danger (suppression de compte, Phase 8).
+//
 // Le toggle update is_public sur public.users via la policy RLS existante
 // ("users: modification de son propre profil"), donc rien à toucher côté DB.
+// La suppression de compte passe par le composant client DeleteAccountConfirmation
+// qui appelle /api/account/delete — voir migration 019 pour le trigger SQL.
 //
 // Pourquoi un composant client séparé (profile-form.tsx) : le toggle a
 // besoin d'état local interactif, ce qui impose "use client". Un server
 // component async ne peut pas contenir de hooks. Le pattern server-fetch +
 // client-interactive est le standard App Router ici.
+//
+// Phase 8 (RGPD) : ajout de la "Zone de danger" en bas de page. Convention
+// UX standard pour les actions irréversibles — séparée visuellement des
+// actions courantes, en bas, avec un signal danger permanent. Le composant
+// client gère son propre state (3 phases : idle / confirming / submitting)
+// et fait la validation du pseudo en local avant d'appeler la route.
+// userPseudo est passé en prop depuis ce server component : la donnée est
+// déjà disponible au moment du render, pas d'appel réseau client
+// supplémentaire.
 // =============================================================================
 import { Card } from "@/components/ui/Card";
 import { createClient } from "@/lib/supabase/server";
 import { ProfileForm } from "./profile-form";
+import { DeleteAccountConfirmation } from "@/components/account/delete-account-confirmation";
 
 export default async function ProfilePage() {
   const supabase = await createClient();
@@ -88,8 +102,27 @@ export default async function ProfilePage() {
           <ProfileForm initialIsPublic={profile.is_public} />
         </Card>
 
+        {/*
+          Zone de danger (Phase 8). Card séparée avec bordure danger pour
+          un signal visuel permanent — indépendant de l'état interne du
+          composant (qui bascule en Card danger lui-même dans sa phase
+          "confirming"). Le userPseudo est passé en prop depuis le server
+          component : pas d'appel client supplémentaire.
+        */}
+        <Card className="border-danger">
+          <h2 className="text-sm font-semibold text-danger">
+            Zone de danger
+          </h2>
+          <p className="mt-1 text-xs text-neutral-500">
+            Actions irréversibles. Lis bien avant de confirmer.
+          </p>
+          <div className="mt-4">
+            <DeleteAccountConfirmation userPseudo={profile.pseudo} />
+          </div>
+        </Card>
+
         <footer className="pb-2 pt-4 text-center text-xs text-neutral-400">
-          Kairo · Phase 1 · profil
+          Kairo · Phase 1 + 8 · profil
         </footer>
       </div>
     </main>
