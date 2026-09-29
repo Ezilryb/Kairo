@@ -74,24 +74,15 @@ stable
 security invoker
 as $$
   select case
-    when p_trade.user_id = auth.uid() then p_trade.initial_capital
+    when (p_trade).user_id = auth.uid() then (p_trade).initial_capital
     when exists (
       select 1 from public.users u
-      where u.id = p_trade.user_id and u.is_public
-    ) then p_trade.initial_capital
+      where u.id = (p_trade).user_id and u.is_public
+    ) then (p_trade).initial_capital
     else null
   end
 $$;
 
-comment on function public.trade_visible_capital(public.trades) is
-  'Masquage whitepaper §09 : retourne initial_capital si le caller est le proprio du trade OU si users.is_public du proprio = true, sinon NULL. Pattern SECURITY INVOKER, suit la même logique que pnl_gross / pnl_net (Phase 3).';
-
-
--- -----------------------------------------------------------------------------
--- 2. trade_visible_quantity(trade)
--- -----------------------------------------------------------------------------
--- Retourne initial_quantity si l'appelant est le proprio OU si le proprio
--- a un profil public, sinon NULL. Taille des Positions engagée à l'entrée.
 create or replace function public.trade_visible_quantity(p_trade public.trades)
 returns numeric
 language sql
@@ -99,25 +90,15 @@ stable
 security invoker
 as $$
   select case
-    when p_trade.user_id = auth.uid() then p_trade.initial_quantity
+    when (p_trade).user_id = auth.uid() then (p_trade).initial_quantity
     when exists (
       select 1 from public.users u
-      where u.id = p_trade.user_id and u.is_public
-    ) then p_trade.initial_quantity
+      where u.id = (p_trade).user_id and u.is_public
+    ) then (p_trade).initial_quantity
     else null
   end
 $$;
 
-comment on function public.trade_visible_quantity(public.trades) is
-  'Masquage whitepaper §09 : retourne initial_quantity (taille engagée à l''entrée, pas la quantity restante post-sorties-partielles) si le caller est le proprio OU si users.is_public du proprio = true, sinon NULL.';
-
-
--- -----------------------------------------------------------------------------
--- 3. trade_visible_pnl_absolute(trade)
--- -----------------------------------------------------------------------------
--- Retourne pnl_net(p_trade) si l'appelant est le proprio OU si le proprio
--- a un profil public, sinon NULL. pnl_net est NULL si le trade n'est pas
--- clôturé (sémantique déjà en place depuis Phase 3, on la propage).
 create or replace function public.trade_visible_pnl_absolute(p_trade public.trades)
 returns numeric
 language sql
@@ -125,10 +106,10 @@ stable
 security invoker
 as $$
   select case
-    when p_trade.user_id = auth.uid() then public.pnl_net(p_trade)
+    when (p_trade).user_id = auth.uid() then public.pnl_net(p_trade)
     when exists (
       select 1 from public.users u
-      where u.id = p_trade.user_id and u.is_public
+      where u.id = (p_trade).user_id and u.is_public
     ) then public.pnl_net(p_trade)
     else null
   end

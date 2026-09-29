@@ -97,10 +97,10 @@ stable
 security invoker
 as $$
   select case
-    when p_trade.exit_price is null or p_trade.status <> 'closed' then null
-    else (p_trade.exit_price - p_trade.entry_price)
-         * p_trade.quantity
-         * public._direction_multiplier(p_trade.direction)
+    when (p_trade).exit_price is null or (p_trade).status <> 'closed' then null
+    else ((p_trade).exit_price - (p_trade).entry_price)
+         * (p_trade).quantity
+         * public._direction_multiplier((p_trade).direction)
   end
 $$;
 
@@ -125,8 +125,8 @@ as $$
   select case
     when public.pnl_gross(p_trade) is null then null
     else public.pnl_gross(p_trade)
-         - coalesce(p_trade.fees, 0)
-         - coalesce(p_trade.slippage, 0)
+         - coalesce((p_trade).fees, 0)
+         - coalesce((p_trade).slippage, 0)
   end
 $$;
 
@@ -148,8 +148,8 @@ stable
 security invoker
 as $$
   select case
-    when public.pnl_net(p_trade) is null or p_trade.capital = 0 then null
-    else (public.pnl_net(p_trade) / p_trade.capital) * 100
+    when public.pnl_net(p_trade) is null or (p_trade).capital = 0 then null
+    else (public.pnl_net(p_trade) / (p_trade).capital) * 100
   end
 $$;
 
@@ -178,10 +178,10 @@ security invoker
 as $$
   with risk as (
     select case
-      when p_trade.stop_loss is not null then
-        abs(p_trade.entry_price - p_trade.stop_loss) * p_trade.quantity
-      when p_trade.risk_percent is not null then
-        (p_trade.risk_percent / 100.0) * p_trade.capital
+      when (p_trade).stop_loss is not null then
+        abs((p_trade).entry_price - (p_trade).stop_loss) * (p_trade).quantity
+      when (p_trade).risk_percent is not null then
+        ((p_trade).risk_percent / 100.0) * (p_trade).capital
       else
         null
     end as amount
@@ -192,7 +192,6 @@ as $$
     else public.pnl_net(p_trade) / (select amount from risk)
   end
 $$;
-
 comment on function public.r_multiple(public.trades) is
   'R-multiple = pnl_net / risk_amount. risk = |entry - stop_loss| * quantity, sinon risk_percent/100 * capital. NULL si pas de stop_loss ni risk_percent, ou si pnl_net NULL.';
 
@@ -261,7 +260,7 @@ as $$
   sums as (
     select
       coalesce(sum(net) filter (where net > 0), 0) as gross_profit,
-      coalesce(abs(sum(net)) filter (where net < 0), 0) as gross_loss
+      coalesce(abs(sum(net) filter (where net < 0)), 0) as gross_loss
     from closed
   )
   select case

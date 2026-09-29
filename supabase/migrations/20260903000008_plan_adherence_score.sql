@@ -38,38 +38,34 @@ as $$
       count(*) filter (where event_type = 'sl_modified')    as sl_count,
       count(*) filter (where event_type = 'tp_modified')    as tp_count
     from public.trade_events
-    where trade_id = p_trade.id
+    where trade_id = (p_trade).id
   ),
   components as (
     select
-      -- Entrée : 0 modif = 25, 1 modif = 15, ≥2 modif = 5
       case
         when ec.entry_count >= 2 then 5
         when ec.entry_count = 1  then 15
         else 25
       end as entry_score,
-      -- SL : idem
       case
         when ec.sl_count >= 2 then 5
         when ec.sl_count = 1  then 15
         else 25
       end as sl_score,
-      -- TP : idem
       case
         when ec.tp_count >= 2 then 5
         when ec.tp_count = 1  then 15
         else 25
       end as tp_score,
-      -- Risque
       case
-        when p_trade.stop_loss is null then 0
-        when p_trade.mistake_type in ('sl_non_respecte','sl_deplace','surdimensionnement') then 0
+        when (p_trade).stop_loss is null then 0
+        when (p_trade).mistake_type in ('sl_non_respecte','sl_deplace','surdimensionnement') then 0
         else 25
       end as risk_score
     from event_counts ec
   )
   select case
-    when p_trade.status not in ('closed','archived') then null
+    when (p_trade).status not in ('closed','archived') then null
     else entry_score + sl_score + tp_score + risk_score
   end
   from components

@@ -81,32 +81,13 @@ stable
 security invoker
 as $$
 begin
-  -- Garde-fou : un user ne peut demander que son propre feed.
-  -- La CTE filtrerait silencieusement via EXISTS, mais autant remonter
-  -- le problème à l'appelant (UX dev, pas un trou de sécurité — la RLS
-  -- de trades filtre de toute façon ce qu'on peut SELECT).
-  if p_user_id <> auth.uid() then
+  if p_user_id is distinct from auth.uid() then
     raise exception
       'get_feed: p_user_id (%) ne correspond pas à auth.uid() (%)',
       p_user_id, auth.uid();
   end if;
 
   return query
-    with feed_trades as (
-      select t.*
-      from public.trades t
-      where t.is_public = true
-        and t.published_at is not null
-        and exists (
-          -- Le trade est publié par un user qu'on follow.
-          select 1 from public.followers f
-          where f.follower_id = p_user_id
-            and f.followee_id = t.user_id
-        )
-        and (p_before is null or t.published_at < p_before)
-      order by t.published_at desc
-      limit greatest(p_limit, 1)
-    )
     select
       t.id,
       u.pseudo,
@@ -123,11 +104,20 @@ begin
       (select count(*) from public.trade_comments c
          where c.trade_id = t.id and c.deleted_at is null),
       t.published_at
-    from feed_trades t
+    from public.trades t
     join public.users u       on u.id = t.user_id
-    join public.instruments i on i.id = t.instrument_id;
+    join public.instruments i on i.id = t.instrument_id
+    where t.is_public = true
+      and t.published_at is not null
+      and exists (
+        select 1 from public.followers f
+        where f.follower_id = p_user_id
+          and f.followee_id = t.user_id
+      )
+      and (p_before is null or t.published_at < p_before)
+    order by t.published_at desc
+    limit greatest(p_limit, 1);
 end $$;
-
 comment on function public.get_feed(uuid, timestamptz, int) is
   'Feed personnalisé : trades publics (trades.is_public = true) des users suivis, triés par published_at décroissant. Pagination par curseur (p_before). Applique le masquage §09 via trade_visible_capital/_quantity/_pnl_absolute. SECURITY INVOKER, p_user_id doit correspondre à auth.uid() sinon raise.';
 
