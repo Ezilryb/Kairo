@@ -11,28 +11,15 @@
 -- IMPÉRATIF TECHNIQUE : les 2 nouveaux paramètres vont en FIN de liste,
 -- après p_since, avec default null. CREATE OR REPLACE FUNCTION n'accepte
 -- d'ajouter des paramètres à une fonction existante que s'ils sont ajoutés
--- en fin de liste avec une valeur par défaut. Si on les insérait au milieu,
--- Postgres créerait une fonction surchargée distincte au lieu de remplacer
--- l'existante. L'ordre choisi préserve aussi la compatibilité positionnelle
--- des appels déjà écrits dans les tests 19-28.
+-- en fin de liste avec une valeur par défaut.
 --
--- Comportement des nouveaux filtres :
---   - p_day_of_week = 0..6 : match public._day_of_week(t.opened_at) = p_day_of_week
---   - p_duration_bucket = 'lt_15m' | '15m_1h' | '1h_4h' | '4h_1d' | 'gt_1d' | 'unknown'
---     match public._duration_bucket(t.closed_at - t.opened_at) = p_duration_bucket
---   - 'unknown' match les trades dont la durée est NULL (live, forgotten)
---
--- CORRECTIF Phase 9 (revue migrations, suite round sécurité trade_events) :
--- la version d'origine filtrait via une CTE `filtered as (select t.* from
--- trades t where ...)` puis réutilisait `t.*` dans la requête externe
--- (`from filtered t`). Le `t.*` d'une CTE est un `record` anonyme,
--- structurellement identique à `public.trades` mais pas nominalement
--- typé comme tel — `pnl_net(t.*)`, `r_multiple(t.*)`, `rendement_pct(t.*)`
--- échouent avec "function ... does not exist" (même famille de bug que
--- get_feed, migration 014). Fix : interroger `public.trades t`
--- directement, filtres déplacés dans le WHERE de la requête finale —
--- aucune dimension perdue, les 7 filtres (day_of_week et duration_bucket
--- inclus) sont préservés à l'identique.
+-- CORRECTIF Phase 9 (revue migrations) : la version d'origine filtrait via
+-- une CTE `filtered as (select t.* from trades t where ...)` puis
+-- réutilisait `t.*` dans la requête externe. Le `t.*` d'une CTE est un
+-- `record` anonyme, pas nominalement `public.trades` — pnl_net(t.*) etc.
+-- échouaient. Fix : interroger `public.trades t` directement, filtres
+-- déplacés dans le WHERE final. Aucune dimension perdue, les 7 filtres
+-- (day_of_week et duration_bucket inclus) sont préservés à l'identique.
 -- =============================================================================
 
 create or replace function public.analytics_crosstab(
