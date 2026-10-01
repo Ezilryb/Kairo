@@ -117,15 +117,17 @@ const EVENT_TONES: Record<TradeEventType, BadgeTone> = {
 // chaque ligne). On garde un mapping séparé des badges pour pouvoir
 // donner un signal visuel plus saturé sur le dot que sur le badge
 // (le dot doit "peser" sur la timeline, le badge doit rester léger).
+// Phase 9 round 4 : utilise les tokens `warning` au lieu des utilitaires
+// Tailwind `amber-*` bruts, conformément à l'alignement design system.
 const EVENT_DOT_CLASSES: Record<TradeEventType, string> = {
   created: "bg-neutral-400 ring-neutral-200",
   published: "bg-info ring-info-border",
-  entry_modified: "bg-amber-500 ring-amber-200",
-  sl_modified: "bg-amber-500 ring-amber-200",
-  tp_modified: "bg-amber-500 ring-amber-200",
+  entry_modified: "bg-warning ring-warning-border",
+  sl_modified: "bg-warning ring-warning-border",
+  tp_modified: "bg-warning ring-warning-border",
   info_modified: "bg-neutral-400 ring-neutral-200",
   partial_exit: "bg-info ring-info-border",
-  marked_forgotten: "bg-amber-500 ring-amber-200",
+  marked_forgotten: "bg-warning ring-warning-border",
   reactivated: "bg-info ring-info-border",
   closed: "bg-success ring-success-border",
   archived: "bg-neutral-400 ring-neutral-200",

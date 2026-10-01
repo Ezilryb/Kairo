@@ -174,10 +174,10 @@ export function TradeForm({
             onChange={(e) => setData((d) => ({ ...d, instrument_id: e.target.value }))}
             className={[
               "mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm text-neutral-900",
-              "focus:outline-none focus:ring-2 focus:ring-offset-1",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1",
               validation.instrument_id
-                ? "border-danger-border focus:border-danger focus:ring-danger"
-                : "border-neutral-300 focus:border-info focus:ring-info",
+                ? "border-danger-border focus-visible:border-danger focus-visible:ring-danger"
+                : "border-neutral-300 focus-visible:border-info focus-visible:ring-info",
             ].join(" ")}
             required
           >
@@ -281,7 +281,7 @@ export function TradeForm({
           value={data.notes}
           onChange={(e) => setData((d) => ({ ...d, notes: e.target.value }))}
           rows={3}
-          className="mt-3 block w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 focus:border-info focus:outline-none focus:ring-2 focus:ring-info focus:ring-offset-1"
+          className="mt-3 block w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 focus-visible:border-info focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-info focus-visible:ring-offset-1"
           placeholder="Raison d'entrée, contexte, observations…"
         />
       </Card>
@@ -363,10 +363,10 @@ function Field({
           className={[
             "block w-full rounded-lg border bg-white px-3 py-2 pr-8 text-sm text-neutral-900",
             "font-mono tabular-nums",
-            "focus:outline-none focus:ring-2 focus:ring-offset-1",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1",
             error
-              ? "border-danger-border focus:border-danger focus:ring-danger"
-              : "border-neutral-300 focus:border-info focus:ring-info",
+              ? "border-danger-border focus-visible:border-danger focus-visible:ring-danger"
+              : "border-neutral-300 focus-visible:border-info focus-visible:ring-info",
           ].join(" ")}
         />
         {unit ? (

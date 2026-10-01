@@ -20,7 +20,8 @@ const config: Config = {
       },
       // Couleurs sémantiques trading : on NE redéfinit pas toute la palette
       // Tailwind (neutres conservés). success/danger alignés sur green-600 /
-      // red-600 pour un contraste AA sur fond blanc.
+      // red-600 pour un contraste AA sur fond blanc. warning aligné sur
+      // amber-500/700 (Phase 9 round 4 — alignement design system).
       colors: {
         // Couleur structurelle des cartes — doit contraster avec le fond de
         // page (neutral-50). Sans cette entrée, `bg-card` n'est pas généré
@@ -43,6 +44,13 @@ const config: Config = {
           fg: "#FFFFFF",
           subtle: "#DBEAFE", // blue-100
           border: "#93C5FD", // blue-300
+        },
+        warning: {
+          DEFAULT: "#D97706", // amber-600 (DEFAULT saturé pour usage solide
+                               //   — correspond à text-warning sur fond clair)
+          fg: "#FFFFFF",
+          subtle: "#FEF3C7", // amber-100
+          border: "#FCD34D", // amber-300
         },
       },
       // Cartes data-dense Google Finance : on garde l'ombre très légère,

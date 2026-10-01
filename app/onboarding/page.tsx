@@ -116,10 +116,10 @@ export default function OnboardingPage() {
               className={[
                 "mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm text-neutral-900",
                 "transition-colors duration-100",
-                "focus:outline-none focus:ring-2 focus:ring-offset-1",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1",
                 validationError
-                  ? "border-danger-border focus:border-danger focus:ring-danger"
-                  : "border-neutral-300 focus:border-info focus:ring-info",
+                  ? "border-danger-border focus-visible:border-danger focus-visible:ring-danger"
+                  : "border-neutral-300 focus-visible:border-info focus-visible:ring-info",
                 "disabled:cursor-not-allowed disabled:opacity-70",
               ].join(" ")}
             />

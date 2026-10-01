@@ -33,81 +33,79 @@
 // lève une exception explicite. Ça bloque aussi la "republication"
 // d'un trade déjà live pour reset la fenêtre 60 s.
 //
-// Côté UX, on garde le même pattern que les autres formulaires :
-// useTransition + .select()-like via rpc + router.refresh() pour que
-// la page serveur re-render avec le nouveau statut.
+// Phase 9 round 5 (bug fix) :
+//   - `useTransition` retiré. Sa promesse est fire-and-forget par
+//     construction : `handlePublish()` se résolvait avant que le RPC
+//     ne finisse, donc `await onConfirm()` dans ConfirmDialog fermait
+//     le dialog immédiatement. Le RPC est maintenant appelé directement
+//     dans la fonction async.
+//   - `throw` sur erreur (en plus de `setError`). Sans throw, le
+//     mécanisme "le dialog reste ouvert si onConfirm throw" de
+//     ConfirmDialog ne se déclenchait jamais — l'erreur n'apparaissait
+//     qu'en petit texte sous le bouton après fermeture.
+//   - Phase 9 round 4 (F1) : confirmation via ConfirmDialog (Card + saisie
+//     explicite), remplace le `confirm()` natif.
 // =============================================================================
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { createClient } from "@/lib/supabase/client";
 
 export function TradePublishButton({ tradeId }: { tradeId: string }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [pending, startTransition] = useTransition();
+  const [confirming, setConfirming] = useState(false);
 
-  const handlePublish = () => {
-    // Confirmation explicite : la publication est un point de non-retour
-    // (les 60 secondes de fenêtre scalping démarrent immédiatement).
-    // On ne veut pas qu'un clic maladroit publie un brouillon à moitié
-    // rempli. Le confirm() natif suffit pour le Point C ; on pourra
-    // remplacer par un Dialog plus tard si on veut plus de polish.
-    if (
-      !confirm(
-        "Publier ce trade ?\n\nUne fois publié, l'entrée, le capital et la quantité seront verrouillés 60 secondes après la publication (fenêtre scalping, whitepaper §04).",
-      )
-    ) {
-      return;
-    }
+  const handlePublish = async () => {
     setError(null);
-    startTransition(async () => {
-      const supabase = createClient();
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-      if (userError || !user) {
-        setError("Session non chargée.");
-        return;
-      }
+    const supabase = createClient();
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+    if (userError || !user) {
+      const msg = "Session non chargée.";
+      setError(msg);
+      throw new Error(msg);
+    }
 
-      // RPC SECURITY INVOKER : now() est évalué côté base, pas par le
-      // client. Le user_id dans le WHERE du RPC utilise auth.uid(), donc
-      // on n'a pas besoin de `.eq("user_id", user.id)` ici — c'est le
-      // RPC qui filtre. Voir le commentaire en tête de la migration
-      // 20260901000002_publish_trade_rpc.sql pour le détail.
-      //
-      // `rpc` sur une fonction qui retourne `public.trades` (un objet
-      // unique) renvoie l'objet directement, pas un tableau. Donc on
-      // vérifie `!updated` plutôt que `updated.length === 0`.
-      const { data: updated, error: updateError } = await supabase.rpc(
-        "publish_trade",
-        { p_trade_id: tradeId },
-      );
+    // RPC SECURITY INVOKER : now() est évalué côté base, pas par le
+    // client. Le user_id dans le WHERE du RPC utilise auth.uid(), donc
+    // on n'a pas besoin de `.eq("user_id", user.id)` ici — c'est le
+    // RPC qui filtre. Voir le commentaire en tête de la migration
+    // 20260901000002_publish_trade_rpc.sql pour le détail.
+    //
+    // `rpc` sur une fonction qui retourne `public.trades` (un objet
+    // unique) renvoie l'objet directement, pas un tableau. Donc on
+    // vérifie `!updated` plutôt que `updated.length === 0`.
+    const { data: updated, error: updateError } = await supabase.rpc(
+      "publish_trade",
+      { p_trade_id: tradeId },
+    );
 
-      if (updateError) {
-        // Messages possibles (tous en français, déjà lisibles) :
-        //   - "Trade introuvable, déjà publié, ou non autorisé" (RPC)
-        //   - Exception d'un trigger métier (peu probable ici car on
-        //     passe de draft à live, mais on remonte tel quel)
-        setError(updateError.message);
-        return;
-      }
-      if (!updated) {
-        // Filet de sécurité : rpc n'a pas renvoyé d'erreur mais n'a
-        // pas non plus retourné la ligne. Ne devrait pas arriver (le
-        // RPC lève une exception dans ce cas), mais on reste explicite.
-        setError("Publication refusée (réponse vide du serveur).");
-        return;
-      }
-      // Refresh serveur : la page re-render, le composant détecte le
-      // nouveau statut 'live', le countdown démarre. Pas de router.push
-      // (on reste sur la même URL, on ne perd pas le contexte).
-      router.refresh();
-    });
+    if (updateError) {
+      // Messages possibles (tous en français, déjà lisibles) :
+      //   - "Trade introuvable, déjà publié, ou non autorisé" (RPC)
+      //   - Exception d'un trigger métier (peu probable ici car on
+      //     passe de draft à live, mais on remonte tel quel)
+      setError(updateError.message);
+      throw new Error(updateError.message);
+    }
+    if (!updated) {
+      // Filet de sécurité : rpc n'a pas renvoyé d'erreur mais n'a
+      // pas non plus retourné la ligne. Ne devrait pas arriver (le
+      // RPC lève une exception dans ce cas), mais on reste explicite.
+      const msg = "Publication refusée (réponse vide du serveur).";
+      setError(msg);
+      throw new Error(msg);
+    }
+    // Refresh serveur : la page re-render, le composant détecte le
+    // nouveau statut 'live', le countdown démarre. Pas de router.push
+    // (on reste sur la même URL, on ne perd pas le contexte).
+    router.refresh();
   };
 
   return (
@@ -115,17 +113,28 @@ export function TradePublishButton({ tradeId }: { tradeId: string }) {
       <Button
         type="button"
         variant="primary"
-        onClick={handlePublish}
-        disabled={pending}
-        aria-busy={pending}
+        onClick={() => setConfirming(true)}
       >
-        {pending ? "Publication…" : "Publier le trade"}
+        Publier le trade
       </Button>
-      {error ? (
+      {error && !confirming ? (
         <p role="alert" className="text-xs text-danger">
           {error}
         </p>
       ) : null}
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={(open) => {
+          setConfirming(open);
+          if (!open) setError(null);
+        }}
+        title="Publier ce trade ?"
+        description="Une fois publié, l'entrée, le capital et la quantité seront verrouillés 60 secondes après la publication (fenêtre scalping, whitepaper §04)."
+        confirmLabel="Publier"
+        confirmVariant="primary"
+        onConfirm={handlePublish}
+        errorMessage={error}
+      />
     </div>
   );
 }

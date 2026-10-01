@@ -6,6 +6,10 @@
 // (fond plein) pour mettre en avant.
 //
 // Pas de ref : composant leaf, pas concerné par React 19 ref-as-prop.
+//
+// Phase 9 round 4 : warning utilise désormais les tokens `bg-warning`/
+// `bg-warning-subtle`/`border-warning-border` au lieu des utilitaires
+// Tailwind bruts `bg-amber-*`. Cohérence avec success/danger/info.
 // =============================================================================
 import type { HTMLAttributes, ReactNode } from "react";
 
@@ -30,7 +34,7 @@ const toneSubtle: Record<BadgeTone, string> = {
   success: "bg-success-subtle text-success border border-success-border",
   danger: "bg-danger-subtle text-danger border border-danger-border",
   info: "bg-info-subtle text-info border border-info-border",
-  warning: "bg-amber-50 text-amber-700 border border-amber-200",
+  warning: "bg-warning-subtle text-warning border border-warning-border",
 };
 
 const toneSolid: Record<BadgeTone, string> = {
@@ -38,7 +42,7 @@ const toneSolid: Record<BadgeTone, string> = {
   success: "bg-success text-success-fg border border-success",
   danger: "bg-danger text-danger-fg border border-danger",
   info: "bg-info text-info-fg border border-info",
-  warning: "bg-amber-500 text-white border border-amber-500",
+  warning: "bg-warning text-warning-fg border border-warning",
 };
 
 const sizeClasses: Record<BadgeSize, string> = {

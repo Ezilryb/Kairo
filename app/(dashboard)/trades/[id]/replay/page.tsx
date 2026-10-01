@@ -45,41 +45,43 @@ export default async function TradeReplayPage({
   if (!instrument) notFound();
 
   return (
-    <div className="space-y-4 p-6">
-      <Link
-        href={`/trades/${id}`}
-        className="inline-flex items-center gap-1 text-sm text-neutral-600 hover:text-neutral-900"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Retour au trade
-      </Link>
+    <main className="min-h-screen bg-neutral-50">
+      <div className="mx-auto max-w-6xl space-y-6 px-6 py-8">
+        <Link
+          href={`/trades/${id}`}
+          className="inline-flex items-center gap-1 text-sm text-neutral-600 hover:text-neutral-900"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Retour au trade
+        </Link>
 
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-neutral-900">
-            Replay — {instrument.symbol}
-          </h1>
-          <p className="text-sm text-neutral-600">
-            {instrument.name} · {instrument.asset_class}
-          </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              Replay — {instrument.symbol}
+            </h1>
+            <p className="mt-1 text-sm text-neutral-500">
+              {instrument.name} · {instrument.asset_class}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge tone="neutral">Status: {trade.status}</Badge>
+            <Link
+              href={`/trades/${id}/chart`}
+              className="rounded-md border border-neutral-300 bg-white px-3 py-1 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+            >
+              Mode Chart →
+            </Link>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge tone="neutral">Status: {trade.status}</Badge>
-          <Link
-            href={`/trades/${id}/chart`}
-            className="rounded-md border border-neutral-300 bg-white px-3 py-1 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-          >
-            Mode Chart →
-          </Link>
-        </div>
+
+        <TradeReplay
+          symbol={instrument.symbol}
+          openedAt={trade.opened_at}
+          closedAt={trade.closed_at}
+          assetClass={instrument.asset_class}
+        />
       </div>
-
-      <TradeReplay
-        symbol={instrument.symbol}
-        openedAt={trade.opened_at}
-        closedAt={trade.closed_at}
-        assetClass={instrument.asset_class}
-      />
-    </div>
+    </main>
   );
 }

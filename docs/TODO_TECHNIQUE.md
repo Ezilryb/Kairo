@@ -369,6 +369,136 @@ risque de redécouvrir si on n'a pas la trace.
     Phase 8 — le bug critique Phase 8 est clos côté revue depuis
     plusieurs tours).
 
+- **Paramètre composite en `language sql` — accès par point vs par
+  parenthèses** (Phase 9 round 4, leçons du rattrapage migrations
+  rattrapées). Piège générique PostgreSQL qui revient à chaque fois
+  qu'on écrit une fonction SECURITY INVOKER ou SECURITY DEFINER
+  prenant un paramètre de type composite (typiquement `public.trades`)
+  en `language sql`. Le pattern fautif :
+  ```sql
+  create function foo(p_trade public.trades) returns ... as $$
+    select p_trade.entry_price;  -- ❌ SYNTAXE AMBIGUË
+  $$ language sql;
+  ```
+  PostgreSQL parse `p_trade.entry_price` comme `table.column` et
+  cherche une table nommée `p_trade` dans le FROM. Résultat : erreur
+  `relation "p_trade" does not exist` à l'exécution, ou pire : si une
+  table nommée `p_trade` existe dans le search_path, lecture d'une
+  colonne au lieu du paramètre (résultat silencieux faux). Fix :
+  **toujours parenthéser l'accès à un paramètre composite** :
+  ```sql
+  select (p_trade).entry_price;  -- ✓ accès au paramètre
+  ```
+  Les parenthèses désambiguïsent : `p_trade.entry_price` = table.colonne
+  (cherche `p_trade` dans le FROM), `(p_trade).entry_price` = accès au
+  paramètre composite puis projection d'un champ. Sans les parenthèses,
+  la plupart des fonctions de `003_financial_calcs.sql`
+  (`pnl_gross`, `pnl_net`, `rendement_pct`, `r_multiple`),
+  `004_realized_pnl.sql`, `008_plan_adherence_score.sql`, et les 3
+  fonctions de `013_privacy_masking.sql` (`trade_visible_capital`,
+  `trade_visible_quantity`, `trade_visible_pnl_absolute`) levaient
+  une erreur à l'exécution réelle — le parser `plpgsql` était
+  probablement plus tolérant que `sql` sur ce cas lors des tests
+  antérieurs, ou les tests n'exerçaient pas le path fautif. **Règle** :
+  à chaque fonction `language sql` qui prend un paramètre composite,
+  recompter les `(param).champ` dans tout le corps et vérifier que
+  chaque accès est parenthésé.
+
+- **CTE renvoyant `record` anonyme — pas `public.trades`** (Phase 9
+  round 4, même contexte de rattrapage). Quand une fonction SQL passe
+  le résultat d'une CTE à une autre fonction qui attend un type
+  composite précis (ex : `pnl_net(public.trades)`, `trade_visible_capital(public.trades)`),
+  la CTE doit fournir le type attendu. Le pattern fautif :
+  ```sql
+  with filtered as (select t.* from public.trades t where ...)
+  select pnl_net(t.*)  -- ❌ t de la CTE = record anonyme
+    from filtered t;
+  ```
+  Quand `t` vient d'une CTE, son type est `record` (générique), pas
+  `public.trades`. La fonction appelée attend un composite typé et le
+  cast échoue silencieusement (ou lève, selon la version PG). Fix :
+  **ne pas utiliser de CTE intermédiaire** — interroger la table
+  directement avec les filtres dans le WHERE final :
+  ```sql
+  select pnl_net(t.*)
+    from public.trades t
+    where <conditions>;
+  -- ou avec des paramètres : where t.user_id = p_user_id and ...
+  ```
+  Alternative qui marche : caster explicitement la CTE :
+  ```sql
+  with filtered as (select t.* from public.trades t where ... order by t.id)
+  select pnl_net(filtered.*) from filtered;  -- qualified name, pas alias t
+  ```
+  Mais la première forme (table directe + WHERE) est plus lisible et
+  évite le risque de confusion d'alias. Touchait `009_analytics_crosstab.sql`
+  (filtrage puis passage à pnl_net / trade_visible_capital / etc.) et
+  `014_feed.sql` (get_feed avec filtrage followers). `010_crosstab_extra_dimensions.sql`
+  utilisait déjà la bonne structure (table directe). **Règle** : à chaque
+  fonction qui passe `t.*` à une autre fonction typée, vérifier que
+  `t` est bien un alias direct vers une table nommée (pas un alias
+  depuis une CTE).
+
+- **Loading state React : `useRef` n'est PAS un state** (Phase 9 round 5,
+  bug dans `ConfirmDialog` à la première rédaction). Piège : muter un
+  ref ne déclenche pas de re-render. Pattern fautif observé :
+  ```tsx
+  const internalLoadingRef = useRef(false);
+  // ...
+  const isLoading = externalLoading ?? internalLoadingRef.current;
+  // ...
+  internalLoadingRef.current = true;  // mutation, pas de re-render
+  ```
+  Tant qu'un caller passe `loading` (externalLoading), le bug est masqué
+  parce que la valeur utilisée vient de la prop. Le premier futur caller
+  qui ne passe pas `loading` verra un bouton qui ne passe jamais en
+  état "chargement" pendant son propre appel. Fix : `useState`. Le
+  contrat de `useRef` = "valeur persistante entre renders, pas de
+  re-render déclenché" ≠ "state local du composant". Pour ce dernier,
+  c'est `useState`. **Règle** : pour toute valeur qui doit (a) persister
+  entre renders ET (b) déclencher un re-render quand elle change, c'est
+  `useState`. Si l'un des deux manque, `useRef` peut convenir.
+
+- **`startTransition` ne retourne aucune promesse liée au callback**
+  (Phase 9 round 5, bug dans `TradePublishButton` et `TradeTransitionButton`).
+  Piège : `startTransition(async () => { ... })` est fire-and-forget
+  par construction. La fonction externe `handleX` se résout
+  quasi-instantanément après avoir appelé `startTransition`, **avant**
+  que la Promesse du callback ne finisse. Pattern fautif observé :
+  ```tsx
+  const handlePublish = async () => {
+    startTransition(async () => {       // ← fire-and-forget
+      await supabase.rpc(...);
+      // ...
+    });
+  };
+  <ConfirmDialog onConfirm={handlePublish} />
+  ```
+  Conséquence : `await onConfirm()` dans ConfirmDialog résout
+  immédiatement, le dialog se ferme, et l'utilisateur ne voit pas
+  l'erreur si le RPC plante. Le caller doit soit :
+  ```tsx
+  const handlePublish = async () => {
+    // Pas de startTransition — RPC direct ici.
+    const { data, error } = await supabase.rpc(...);
+    if (error) {
+      setError(error.message);
+      throw new Error(error.message);  // ← throw obligatoire aussi
+    }
+    // ...
+  };
+  ```
+  `throw` est essentiel : sans throw, le mécanisme "le dialog reste
+  ouvert si onConfirm throw" de ConfirmDialog ne se déclenche jamais
+  — l'erreur n'apparaît qu'en petit texte sous le bouton après
+  fermeture. **Règle** : si on a besoin d'attendre la fin d'une action
+  async pour fermer un dialog (ou afficher une erreur dans ce dialog),
+  appeler directement la Promesse (sans `startTransition`), et
+  `throw` (pas juste `setError(...)`) en cas d'échec. `startTransition`
+  est utile uniquement pour les updates NON-bloquants sur la UI
+  (markers de saisie, navigation, etc.), pas pour les actions critiques
+  qui doivent séquencer un dialog.
+
 - **Policies RLS oubliées lors d'un update d'une policy sœur** (Phase 9,
   discovery pendant l'audit composant PoP). Quand on durcit une policy
   SELECT sur une table (ex : trades en Phase 7 — migration 018, ajout

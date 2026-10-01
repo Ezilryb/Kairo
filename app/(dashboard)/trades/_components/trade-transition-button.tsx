@@ -20,12 +20,17 @@
 // que les 2 divergent. Le RPC est SECURITY INVOKER, la RLS s'applique,
 // l'UI ne fait qu'invoquer la transition demandée par l'utilisateur.
 //
-// Côté UX, on reproduit le pattern TradePublishButton (Phase 2 Point
-// C) : useTransition + confirm() + router.refresh() pour que la
-// page serveur re-render avec le nouveau statut. Le confirm()
-// informe l'utilisateur de l'action — la transition est généralement
-// définitive ou du moins structurante (clôture, archivage, etc.),
-// on ne veut pas d'un clic maladroit.
+// Phase 9 round 5 (bug fix) : voir TradePublishButton pour le détail.
+//   - `useTransition` retiré pour les mêmes raisons : sa promesse est
+//     fire-and-forget, le dialog ConfirmDialog se fermait avant la fin
+//     du RPC.
+//   - `throw` sur erreur : sinon le mécanisme "dialog reste ouvert si
+//     onConfirm throw" de ConfirmDialog ne se déclenchait jamais.
+//
+// Phase 9 round 4 (F1) : confirmation via ConfirmDialog (Card + saisie
+// explicite), remplace le `confirm()` natif. Variant du bouton de
+// confirmation : archivage = danger (terminal, whitepaper §04), les
+// autres transitions restent primary.
 //
 // L'UI n'affiche QUE les boutons correspondant aux transitions
 // valides pour le statut actuel (cf. table des transitions dans la
@@ -51,9 +56,10 @@
 // =============================================================================
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Button } from "@/components/ui/Button";
+import { Button, type ButtonVariant } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { createClient } from "@/lib/supabase/client";
 
 // targetStatus est restreint aux valeurs que l'UI est susceptible
@@ -87,78 +93,81 @@ export function TradeTransitionButton({
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [pending, startTransition] = useTransition();
+  const [confirming, setConfirming] = useState(false);
 
-  const handleClick = () => {
-    // Confirmation explicite : les transitions sont des points de
-    // non-retour (sauf forgotten → live). Le confirm() natif suffit
-    // pour le Point D, on pourra remplacer par un Dialog plus tard.
-    if (!confirm(confirmMessage)) return;
+  // Variant du bouton de confirmation : archivage = danger (terminal,
+  // whitepaper §04), les autres transitions restent primary (réversibles
+  // ou moins structurantes selon la state machine).
+  const confirmVariant: ButtonVariant = targetStatus === "archived" ? "danger" : "primary";
+
+  const handleConfirm = async () => {
     setError(null);
-    startTransition(async () => {
-      const supabase = createClient();
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-      if (userError || !user) {
-        setError("Session non chargée.");
-        return;
-      }
+    const supabase = createClient();
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+    if (userError || !user) {
+      const msg = "Session non chargée.";
+      setError(msg);
+      throw new Error(msg);
+    }
 
-      // RPC SECURITY INVOKER : la RLS + le filtre user_id du WHERE
-      // du RPC s'appliquent via les droits de l'appelant. On n'a
-      // pas besoin de .eq("user_id", user.id) ici — c'est le RPC
-      // qui filtre. Voir le commentaire en tête de la migration
-      // 20260901000003_trade_transitions.sql pour le détail.
-      //
-      // `rpc` sur une fonction qui retourne `public.trades` (un
-      // objet unique) renvoie l'objet directement, pas un tableau.
-      // On vérifie `!updated` plutôt que `updated.length === 0`.
-      const { data: updated, error: updateError } = await supabase.rpc(
-        "transition_trade",
-        { p_trade_id: tradeId, p_new_status: targetStatus },
+    // RPC SECURITY INVOKER : la RLS + le filtre user_id du WHERE
+    // du RPC s'appliquent via les droits de l'appelant. On n'a
+    // pas besoin de .eq("user_id", user.id) ici — c'est le RPC
+    // qui filtre. Voir le commentaire en tête de la migration
+    // 20260901000003_trade_transitions.sql pour le détail.
+    //
+    // `rpc` sur une fonction qui retourne `public.trades` (un
+    // objet unique) renvoie l'objet directement, pas un tableau.
+    // On vérifie `!updated` plutôt que `updated.length === 0`.
+    const { data: updated, error: updateError } = await supabase.rpc(
+      "transition_trade",
+      { p_trade_id: tradeId, p_new_status: targetStatus },
+    );
+
+    if (updateError) {
+      // Messages possibles (tous en français, déjà lisibles) :
+      //   - "Transition non autorisée : X → Y (whitepaper §04)"
+      //   - "Trade introuvable ou non autorisé"
+      // On remonte tel quel, comme partout ailleurs dans le projet.
+      setError(updateError.message);
+      throw new Error(updateError.message);
+    }
+    if (!updated) {
+      // Filet de sécurité : rpc n'a pas renvoyé d'erreur mais n'a
+      // pas non plus renvoyé la ligne. Ne devrait pas arriver (le
+      // RPC lève une exception dans ce cas), mais on reste explicite.
+      const msg = "Transition refusée (réponse vide du serveur).";
+      setError(msg);
+      throw new Error(msg);
+    }
+    // Refresh serveur : la page re-render avec le nouveau statut,
+    // les boutons de transition sont recalculés (les boutons valides
+    // changent selon le statut). Pas de router.push (on reste sur
+    // la même URL, on ne perd pas le contexte).
+    router.refresh();
+
+    // Chaînage automatique post-clôture (Phase 5, §08 point 4) :
+    // si transition vers 'closed' et asset crypto, fire-and-forget
+    // le calcul + persistance MAE/MFE. L'endpoint revérifie crypto
+    // côté serveur (défense en profondeur) et skippe proprement si
+    // non. Le user peut voir mae/mfe sur /trades/[id]/chart après
+    // quelques secondes. Pas d'await : on ne bloque pas l'UX de la
+    // transition.
+    if (targetStatus === "closed" && assetClass === "crypto") {
+      fetch(`/api/trades/${tradeId}/mae-mfe`, { method: "POST" }).catch(
+        (err) => {
+          console.error(
+            "[TradeTransitionButton] MAE/MFE fire-and-forget failed:",
+            err
+          );
+        }
       );
-
-      if (updateError) {
-        // Messages possibles (tous en français, déjà lisibles) :
-        //   - "Transition non autorisée : X → Y (whitepaper §04)"
-        //   - "Trade introuvable ou non autorisé"
-        // On remonte tel quel, comme partout ailleurs dans le projet.
-        setError(updateError.message);
-        return;
-      }
-      if (!updated) {
-        // Filet de sécurité : rpc n'a pas renvoyé d'erreur mais n'a
-        // pas non plus renvoyé la ligne. Ne devrait pas arriver (le
-        // RPC lève une exception dans ce cas), mais on reste explicite.
-        setError("Transition refusée (réponse vide du serveur).");
-        return;
-      }
-      // Refresh serveur : la page re-render avec le nouveau statut,
-      // les boutons de transition sont recalculés (les boutons valides
-      // changent selon le statut). Pas de router.push (on reste sur
-      // la même URL, on ne perd pas le contexte).
-      router.refresh();
-
-      // Chaînage automatique post-clôture (Phase 5, §08 point 4) :
-      // si transition vers 'closed' et asset crypto, fire-and-forget
-      // le calcul + persistance MAE/MFE. L'endpoint revérifie crypto
-      // côté serveur (défense en profondeur) et skippe proprement si
-      // non. Le user peut voir mae/mfe sur /trades/[id]/chart après
-      // quelques secondes. Pas d'await : on ne bloque pas l'UX de la
-      // transition.
-      if (targetStatus === "closed" && assetClass === "crypto") {
-        fetch(`/api/trades/${tradeId}/mae-mfe`, { method: "POST" }).catch(
-          (err) => {
-            console.error(
-              "[TradeTransitionButton] MAE/MFE fire-and-forget failed:",
-              err
-            );
-          }
-        );
-      }
-    });
+    }
+    // Succès : le dialog se ferme automatiquement (géré par ConfirmDialog
+    // après que onConfirm résolve sans throw).
   };
 
   return (
@@ -166,17 +175,28 @@ export function TradeTransitionButton({
       <Button
         type="button"
         variant={variant}
-        onClick={handleClick}
-        disabled={pending}
-        aria-busy={pending}
+        onClick={() => setConfirming(true)}
       >
-        {pending ? "En cours…" : label}
+        {label}
       </Button>
-      {error ? (
+      {error && !confirming ? (
         <p role="alert" className="text-xs text-danger">
           {error}
         </p>
       ) : null}
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={(open) => {
+          setConfirming(open);
+          if (!open) setError(null);
+        }}
+        title={label}
+        description={confirmMessage}
+        confirmLabel={label}
+        confirmVariant={confirmVariant}
+        onConfirm={handleConfirm}
+        errorMessage={error}
+      />
     </div>
   );
 }
