@@ -13,8 +13,7 @@
 -- d'ajouter des paramètres à une fonction existante que s'ils sont ajoutés
 -- en fin de liste avec une valeur par défaut. Si on les insérait au milieu,
 -- Postgres créerait une fonction surchargée distincte au lieu de remplacer
--- l'existante, et on se retrouverait avec 2 analytics_crosstab qui
--- coexistent. L'ordre choisi préserve aussi la compatibilité positionnelle
+-- l'existante. L'ordre choisi préserve aussi la compatibilité positionnelle
 -- des appels déjà écrits dans les tests 19-28.
 --
 -- Comportement des nouveaux filtres :
@@ -22,6 +21,18 @@
 --   - p_duration_bucket = 'lt_15m' | '15m_1h' | '1h_4h' | '4h_1d' | 'gt_1d' | 'unknown'
 --     match public._duration_bucket(t.closed_at - t.opened_at) = p_duration_bucket
 --   - 'unknown' match les trades dont la durée est NULL (live, forgotten)
+--
+-- CORRECTIF Phase 9 (revue migrations, suite round sécurité trade_events) :
+-- la version d'origine filtrait via une CTE `filtered as (select t.* from
+-- trades t where ...)` puis réutilisait `t.*` dans la requête externe
+-- (`from filtered t`). Le `t.*` d'une CTE est un `record` anonyme,
+-- structurellement identique à `public.trades` mais pas nominalement
+-- typé comme tel — `pnl_net(t.*)`, `r_multiple(t.*)`, `rendement_pct(t.*)`
+-- échouent avec "function ... does not exist" (même famille de bug que
+-- get_feed, migration 014). Fix : interroger `public.trades t`
+-- directement, filtres déplacés dans le WHERE de la requête finale —
+-- aucune dimension perdue, les 7 filtres (day_of_week et duration_bucket
+-- inclus) sont préservés à l'identique.
 -- =============================================================================
 
 create or replace function public.analytics_crosstab(
@@ -45,20 +56,6 @@ language sql
 stable
 security invoker
 as $$
-  with filtered as (
-    select t.*
-    from public.trades t
-    where t.user_id = p_user_id
-      and t.status = 'closed'
-      and (p_instrument_id   is null or t.instrument_id = p_instrument_id)
-      and (p_direction       is null or t.direction = p_direction)
-      and (p_session         is null or public._trading_session(t.opened_at) = p_session)
-      and (p_setup           is null or t.setup = p_setup)
-      and (p_timeframe       is null or t.timeframe = p_timeframe)
-      and (p_since           is null or t.closed_at >= p_since)
-      and (p_day_of_week     is null or public._day_of_week(t.opened_at) = p_day_of_week)
-      and (p_duration_bucket is null or public._duration_bucket(t.closed_at - t.opened_at) = p_duration_bucket)
-  )
   select
     count(*)::bigint as trade_count,
     case
@@ -67,7 +64,17 @@ as $$
     end as winrate,
     avg(public.r_multiple(t.*))     as avg_r_multiple,
     avg(public.rendement_pct(t.*))  as avg_rendement_pct
-  from filtered t
+  from public.trades t
+  where t.user_id = p_user_id
+    and t.status = 'closed'
+    and (p_instrument_id   is null or t.instrument_id = p_instrument_id)
+    and (p_direction       is null or t.direction = p_direction)
+    and (p_session         is null or public._trading_session(t.opened_at) = p_session)
+    and (p_setup           is null or t.setup = p_setup)
+    and (p_timeframe       is null or t.timeframe = p_timeframe)
+    and (p_since           is null or t.closed_at >= p_since)
+    and (p_day_of_week     is null or public._day_of_week(t.opened_at) = p_day_of_week)
+    and (p_duration_bucket is null or public._duration_bucket(t.closed_at - t.opened_at) = p_duration_bucket)
 $$;
 
 comment on function public.analytics_crosstab(uuid, uuid, public.trade_direction, text, text, public.trade_timeframe, timestamptz, int, text) is

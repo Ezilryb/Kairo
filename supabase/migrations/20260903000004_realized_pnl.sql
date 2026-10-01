@@ -328,7 +328,7 @@ stable
 security invoker
 as $$
   select case
-    when p_trade.status = 'closed' then p_trade.realized_pnl_gross
+    when (p_trade).status = 'closed' then (p_trade).realized_pnl_gross
     else null
   end
 $$;
@@ -354,8 +354,8 @@ stable
 security invoker
 as $$
   select case
-    when public.pnl_net(p_trade) is null or p_trade.initial_capital is null or p_trade.initial_capital = 0 then null
-    else (public.pnl_net(p_trade) / p_trade.initial_capital) * 100
+    when public.pnl_net(p_trade) is null or (p_trade).initial_capital is null or (p_trade).initial_capital = 0 then null
+    else (public.pnl_net(p_trade) / (p_trade).initial_capital) * 100
   end
 $$;
 
@@ -378,10 +378,10 @@ security invoker
 as $$
   with risk as (
     select case
-      when p_trade.stop_loss is not null and p_trade.initial_quantity is not null then
-        abs(p_trade.entry_price - p_trade.stop_loss) * p_trade.initial_quantity
-      when p_trade.risk_percent is not null and p_trade.initial_capital is not null then
-        (p_trade.risk_percent / 100.0) * p_trade.initial_capital
+      when (p_trade).stop_loss is not null and (p_trade).initial_quantity is not null then
+        abs((p_trade).entry_price - (p_trade).stop_loss) * (p_trade).initial_quantity
+      when (p_trade).risk_percent is not null and (p_trade).initial_capital is not null then
+        ((p_trade).risk_percent / 100.0) * (p_trade).initial_capital
       else
         null
     end as amount
@@ -392,7 +392,6 @@ as $$
     else public.pnl_net(p_trade) / (select amount from risk)
   end
 $$;
-
 comment on function public.r_multiple(public.trades) is
   'R-multiple = pnl_net / risk_amount. risk = |entry - stop_loss| * initial_quantity, sinon risk_percent/100 * initial_capital. Le risque est défini à l''entrée et ne change pas après les sorties partielles. NULL si pas de stop_loss ni risk_percent, ou si pnl_net NULL.';
 
