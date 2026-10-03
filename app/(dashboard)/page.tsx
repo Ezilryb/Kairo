@@ -1,25 +1,38 @@
 // /app/(dashboard)/page.tsx
 // =============================================================================
-// Dashboard — désormais dans le route group (dashboard), donc sous la
-// protection de (dashboard)/layout.tsx (vérif session + vérif profil).
-// Le proxy.ts reste la première ligne de défense (redirect rapide vers
-// /login), le layout est l'autorisation réelle (côté serveur, exécuté
-// même si le proxy est contourné — défense en profondeur, cf. CVE-2025-29927).
+// Dashboard — branchement sur données réelles (Phase 10 / Dashboard).
+// =============================================================================
+// Cette page est désormais un server component async qui lit les KPIs
+// financiers de l'utilisateur connecté via les RPCs SECURITY INVOKER de la
+// migration 021. Plus aucune donnée mockée — c'était l'item A4 de l'audit
+// visuel Phase 9 (footer "Phase 0 · données mockées" + chiffres en dur).
 //
-// Le route group (dashboard) ne produit PAS de segment d'URL : cette page
-// répond sur `/`, comme l'ancienne app/page.tsx avant ce déplacement.
-// app/page.tsx a été supprimée pour éviter un conflit de route (deux
-// page.tsx répondant sur `/`).
+// Sémantique des KPIs (cohérente avec la maquette Phase 0, mais câblée
+// sur la réalité) :
+//   - Winrate          % de trades gagnants parmi les closed, fenêtre 30 j
+//   - PnL net (30 j)   somme des pnl_net des trades closed sur 30 j
+//   - Trades ouverts   compte exact des trades status = 'live'
+//   - Drawdown max     pire drawdown absolu en € sur l'equity curve 30 j
+//   - Trades récents   5 derniers trades (toutes statuses), PnL calculé DB
 //
-// Direction Google Finance, données mockées — Phase 0 / Tâche 3 suite.
-// Sera branché sur Supabase en Phase 2 (trades) et Phase 4 (analytics).
+// Pas de delta % sur les StatBlocks V1 : aucune baseline honnête
+// (vs période précédente ? moyenne mobile ?). Afficher un delta inventé
+// serait une métrique qui ment. Différé, à cadrer dans une phase
+// dédiée.
+//
+// Section "Activité" du mock Phase 0 SUPPRIMÉE : pas de source de
+// données (notifications / feed personnel). Différée, à cadrer dans
+// une future phase.
+//
+// Footer "Phase X" SUPPRIMÉ : audit A4, alignement avec le reste du
+// dashboard (les footers "Phase X" sont à retirer des autres pages
+// dans un round dédié, hors scope ici).
 // =============================================================================
 import {
   Activity,
   ArrowDownRight,
   ArrowUp,
   ArrowUpRight,
-  CircleUser,
   Plus,
   TrendingUp,
   Wallet,
@@ -28,154 +41,53 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StatBlock } from "@/components/ui/StatBlock";
+import { createClient } from "@/lib/supabase/server";
 
-// ---- Données mockées --------------------------------------------------------
+// ---- Types -----------------------------------------------------------------
+// Le retour de .rpc() côté Supabase JS s'aligne sur la signature RETURNS TABLE
+// de la fonction SQL : numeric(24,8) arrive en `string` (perte de précision
+// évitée côté JS), `public.trade_status` enum arrive en string littéral.
 
-type TradeStatus = "live" | "draft" | "closed" | "forgotten" | "archived";
+type TradeStatus = "draft" | "live" | "closed" | "forgotten" | "archived";
 type TradeDirection = "long" | "short";
 type AssetClass = "crypto" | "stock" | "forex" | "commodity" | "index" | "etf";
 
-type MockTrade = {
+type RecentTrade = {
   id: string;
-  symbol: string;
-  assetClass: AssetClass;
-  direction: TradeDirection;
   status: TradeStatus;
-  entryPrice: number;
-  currentPrice: number;
-  pnlValue: number;
-  pnlPercent: number;
-  ago: string;
+  direction: TradeDirection;
+  entry_price: string | null;
+  exit_price: string | null;
+  quantity: string | null;
+  capital: string | null;
+  closed_at: string | null;
+  updated_at: string | null;
+  created_at: string | null;
+  instrument_id: string;
+  symbol: string;
+  asset_class: AssetClass;
+  pnl_net: string | null;
+  rendement_pct: string | null;
 };
 
-const MOCK_TRADES: MockTrade[] = [
-  {
-    id: "t1",
-    symbol: "BTCUSDT",
-    assetClass: "crypto",
-    direction: "long",
-    status: "live",
-    entryPrice: 62_410.5,
-    currentPrice: 64_120.0,
-    pnlValue: 342.18,
-    pnlPercent: 2.74,
-    ago: "il y a 12 min",
-  },
-  {
-    id: "t2",
-    symbol: "ETHUSDT",
-    assetClass: "crypto",
-    direction: "short",
-    status: "closed",
-    entryPrice: 3_412.8,
-    currentPrice: 3_298.4,
-    pnlValue: 114.4,
-    pnlPercent: 3.35,
-    ago: "il y a 1 h",
-  },
-  {
-    id: "t3",
-    symbol: "AAPL",
-    assetClass: "stock",
-    direction: "long",
-    status: "live",
-    entryPrice: 224.1,
-    currentPrice: 221.7,
-    pnlValue: -96.0,
-    pnlPercent: -1.07,
-    ago: "il y a 3 h",
-  },
-  {
-    id: "t4",
-    symbol: "NQH5",
-    assetClass: "index",
-    direction: "long",
-    status: "forgotten",
-    entryPrice: 21_120.0,
-    currentPrice: 21_080.0,
-    pnlValue: -40.0,
-    pnlPercent: -0.19,
-    ago: "il y a 6 j",
-  },
-  {
-    id: "t5",
-    symbol: "EURUSD",
-    assetClass: "forex",
-    direction: "short",
-    status: "draft",
-    entryPrice: 1.0825,
-    currentPrice: 0,
-    pnlValue: 0,
-    pnlPercent: 0,
-    ago: "à l'instant",
-  },
-  {
-    id: "t6",
-    symbol: "TSLA",
-    assetClass: "stock",
-    direction: "long",
-    status: "closed",
-    entryPrice: 348.6,
-    currentPrice: 372.4,
-    pnlValue: 238.0,
-    pnlPercent: 6.83,
-    ago: "il y a 2 j",
-  },
-  {
-    id: "t7",
-    symbol: "GLD",
-    assetClass: "etf",
-    direction: "long",
-    status: "archived",
-    entryPrice: 195.4,
-    currentPrice: 198.1,
-    pnlValue: 270.0,
-    pnlPercent: 1.38,
-    ago: "il y a 3 mois",
-  },
-];
+// ---- Constantes ------------------------------------------------------------
 
-type MockActivity = {
-  id: string;
-  kind: "follow" | "trade_published" | "system";
-  actor: string;
-  message: string;
-  ago: string;
-};
-
-const MOCK_ACTIVITY: MockActivity[] = [
-  {
-    id: "a1",
-    kind: "trade_published",
-    actor: "Lucas M.",
-    message: "a publié un nouveau trade BTCUSDT (long)",
-    ago: "il y a 5 min",
-  },
-  {
-    id: "a2",
-    kind: "follow",
-    actor: "Marie D.",
-    message: "a commencé à vous suivre",
-    ago: "il y a 2 h",
-  },
-  {
-    id: "a3",
-    kind: "system",
-    actor: "Kairo",
-    message: "3 trades sont passés en statut OUBLIÉ (inactivité > 5 j)",
-    ago: "il y a 1 j",
-  },
-];
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WINDOW_DAYS = 30;
+const RECENT_TRADES_LIMIT = 5;
 
 // ---- Helpers de présentation -----------------------------------------------
 
 const STATUS_TONE: Record<TradeStatus, BadgeTone> = {
-  // Les statuts de cycle de vie (draft/closed/archived) restent neutres :
-  // un trade clôturé peut être à perte, archivé n'est pas un signal négatif.
-  // L'issue (gain/perte) est déjà portée par la couleur du PnL (valueClass).
+  // Convention UI documentée dans TODO_TECHNIQUE.md, section
+  // "Conventions UI" : les badges de statut encodent le cycle de vie,
+  // jamais l'issue financière. Un trade clôturé peut l'être à perte,
+  // le badge ne le dit pas — c'est la valeur PnL affichée à côté qui
+  // porte la couleur (success/danger). Reprise à l'identique de la
+  // page détail trade pour garder la cohérence visuelle.
   draft: "neutral",
   live: "info",
-  forgotten: "warning", // mérite l'alerte — "à relancer"
+  forgotten: "warning",
   closed: "neutral",
   archived: "neutral",
 };
@@ -188,35 +100,141 @@ const STATUS_LABEL: Record<TradeStatus, string> = {
   archived: "Archivé",
 };
 
-function formatPrice(value: number, assetClass: AssetClass): string {
-  if (value === 0) return "—";
-  // Forex : 5 décimales, le reste : 2 décimales. Toutes les branches passent
-  // par toLocaleString pour respecter la locale française (espace pour les
-  // milliers, virgule décimale) — sans ça, un forex à 1.08250 s'affiche en
-  // anglo-saxon à côté d'un crypto en 62 410,50.
+function formatPrice(
+  value: string | number | null | undefined,
+  assetClass: AssetClass,
+): string {
+  if (value === null || value === undefined) return "—";
+  const v = Number(value);
+  if (!Number.isFinite(v) || v === 0) return "—";
+  // Forex : 5 décimales (lots standard), le reste : 2 décimales.
+  // Toutes les branches passent par toLocaleString pour respecter la
+  // locale française (espace pour les milliers, virgule décimale) —
+  // sans ça, un forex à 1.08250 s'affiche en anglo-saxon à côté d'un
+  // crypto en 62 410,50.
   if (assetClass === "forex") {
-    return value.toLocaleString("fr-FR", {
+    return v.toLocaleString("fr-FR", {
       minimumFractionDigits: 5,
       maximumFractionDigits: 5,
     });
   }
-  return value.toLocaleString("fr-FR", { maximumFractionDigits: 2 });
+  return v.toLocaleString("fr-FR", { maximumFractionDigits: 2 });
 }
 
-function formatSigned(value: number, suffix: string = "€"): string {
-  const sign = value > 0 ? "+" : value < 0 ? "−" : "";
-  const abs = Math.abs(value);
+function formatSigned(
+  value: string | number | null | undefined,
+  suffix = "€",
+): string {
+  if (value === null || value === undefined) return "—";
+  const v = Number(value);
+  if (!Number.isFinite(v)) return "—";
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  const abs = Math.abs(v);
   return `${sign}${abs.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${suffix}`;
 }
 
-function formatSignedPercent(value: number): string {
-  const sign = value > 0 ? "+" : value < 0 ? "−" : "";
-  return `${sign}${Math.abs(value).toFixed(2)}%`;
+function formatSignedPercent(
+  value: string | number | null | undefined,
+): string {
+  if (value === null || value === undefined) return "—";
+  const v = Number(value);
+  if (!Number.isFinite(v)) return "—";
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  return `${sign}${Math.abs(v).toFixed(2)}%`;
 }
 
-// ---- Composants -------------------------------------------------------------
+function formatPercentValue(value: string | number | null | undefined): string {
+  // Pour les StatBlocks (Winrate) : valeur en %, sans signe.
+  if (value === null || value === undefined) return "—";
+  const v = Number(value);
+  if (!Number.isFinite(v)) return "—";
+  return v.toFixed(1);
+}
 
-export default function DashboardPage() {
+function formatCount(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return String(value);
+}
+
+// ---- Page -----------------------------------------------------------------
+
+export default async function DashboardPage() {
+  const supabase = await createClient();
+
+  // Filet de robustesse — le layout de (dashboard) garantit déjà qu'on
+  // a un user ici (sinon redirect /login). Si la session a expiré entre
+  // layout et render, on évite un crash en retournant un fragment vide.
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  // Pseudo pour le sous-titre ("Bienvenue, {pseudo}").
+  const { data: profile } = await supabase
+    .from("users")
+    .select("pseudo")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  // ISO string côté DB — la RPC attend timestamptz, Supabase sérialise
+  // correctement le format ISO 8601 avec timezone.
+  const sinceIso = new Date(Date.now() - WINDOW_DAYS * DAY_MS).toISOString();
+
+  // 5 fetchs en parallèle. Promise.all fail-fast : une seule erreur
+  // réseau remonte. En lecture de dashboard, on accepte le fallback
+  // "—" sur les 4 KPIs si l'un des RPCs échoue — c'est un écran de
+  // consultation, pas une action irréversible. `error` est volontairement
+  // non géré en V1 ; on remonte à un cycle SI on observe du bruit en
+  // logs navigateur (cf. TODO_TECHNIQUE.md leçons logging).
+  const [
+    winrateRpc,
+    pnlRpc,
+    drawdownRpc,
+    openTradesResult,
+    recentTradesRpc,
+  ] = await Promise.all([
+    supabase.rpc("winrate", { p_user_id: user.id, p_since: sinceIso }),
+    supabase.rpc("sum_pnl", { p_user_id: user.id, p_since: sinceIso }),
+    supabase.rpc("max_drawdown", { p_user_id: user.id, p_since: sinceIso }),
+    supabase
+      .from("trades")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .eq("status", "live"),
+    supabase.rpc("recent_trades_with_pnl", {
+      p_user_id: user.id,
+      p_limit: RECENT_TRADES_LIMIT,
+    }),
+  ]);
+
+  // winrate / sum_pnl / max_drawdown sont des fonctions `RETURNS numeric`
+  // (scalaires) — leur `data` est directement la valeur, PAS un tableau.
+  // Bug V1 initial : on indexait `data[0]` comme si c'était une table
+  // function ; côté Supabase JS ça retournait `undefined` systématiquement
+  // et les 3 KPIs affichaient "—" en silence, alors que les vraies valeurs
+  // étaient bien en base. `recent_trades_with_pnl` est `RETURNS TABLE` —
+  // son `data` est bien un tableau, manipulé séparément plus bas.
+  const winrateValue = winrateRpc.data as number | string | null | undefined;
+  const pnlNetValue = pnlRpc.data as number | string | null | undefined;
+  const drawdownValue = drawdownRpc.data as number | string | null | undefined;
+
+  // pnl_net : tonalité dérivée du signe (success si > 0, danger si < 0,
+  // neutral si 0). On ne surcharge pas StatBlock.tone ici, on laisse la
+  // fonction getTone interne faire son boulot à partir du delta — sauf
+  // que V1 n'a pas de delta, donc on force tone via la prop.
+  const pnlNetNumber = pnlNetValue === null || pnlNetValue === undefined ? null : Number(pnlNetValue);
+  const pnlTone =
+    pnlNetNumber === null
+      ? "neutral"
+      : pnlNetNumber > 0
+        ? "success"
+        : pnlNetNumber < 0
+          ? "danger"
+          : "neutral";
+
+  const recentTrades: RecentTrade[] =
+    (recentTradesRpc.data ?? []) as RecentTrade[];
+
   return (
     <main className="min-h-screen bg-neutral-50">
       <div className="mx-auto max-w-6xl space-y-6 px-6 py-8">
@@ -225,7 +243,9 @@ export default function DashboardPage() {
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
             <p className="mt-1 text-sm text-neutral-500">
-              Bienvenue, Momentum_FR. Voici l&apos;état de ton journal.
+              {profile?.pseudo
+                ? `Bienvenue, ${profile.pseudo}. Voici l'état de ton journal.`
+                : "Voici l'état de ton journal."}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -242,40 +262,38 @@ export default function DashboardPage() {
           <Card>
             <StatBlock
               label="Winrate"
-              value="64.2"
+              value={formatPercentValue(winrateValue)}
               unit="%"
               icon={<Activity className="h-4 w-4" />}
-              delta={2.4}
               mono
             />
           </Card>
           <Card>
             <StatBlock
               label="PnL net (30 j)"
-              value="+1 248.40"
-              unit="€"
+              value={formatSigned(pnlNetValue)}
               icon={<TrendingUp className="h-4 w-4" />}
-              delta={4.6}
-              deltaLabel="+4.6%"
+              tone={pnlTone}
             />
           </Card>
           <Card>
             <StatBlock
               label="Trades ouverts"
-              value="3"
+              value={formatCount(openTradesResult.count)}
               icon={<ArrowUp className="h-4 w-4" />}
-              delta={0}
               mono
             />
           </Card>
           <Card>
             <StatBlock
               label="Drawdown max"
-              value="−1 240"
-              unit="€"
+              value={formatSigned(drawdownValue)}
               icon={<Wallet className="h-4 w-4" />}
-              delta={-3.2}
-              deltaLabel="−3.2%"
+              tone={drawdownValue === null || drawdownValue === undefined
+                ? "neutral"
+                : Number(drawdownValue) > 0
+                  ? "danger"
+                  : "neutral"}
             />
           </Card>
         </section>
@@ -285,51 +303,21 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between border-b border-neutral-200 px-4 py-3">
             <h2 className="text-sm font-semibold">Trades récents</h2>
             <span className="text-xs text-neutral-500">
-              {MOCK_TRADES.length} entrées
+              {recentTrades.length} entrées
             </span>
           </div>
-          <ul className="divide-y divide-neutral-100">
-            {MOCK_TRADES.map((trade) => (
-              <TradeRow key={trade.id} trade={trade} />
-            ))}
-          </ul>
+          {recentTrades.length === 0 ? (
+            <div className="px-4 py-8 text-center text-sm text-neutral-500">
+              Aucun trade pour l'instant. Commence par en créer un.
+            </div>
+          ) : (
+            <ul className="divide-y divide-neutral-100">
+              {recentTrades.map((trade) => (
+                <TradeRow key={trade.id} trade={trade} />
+              ))}
+            </ul>
+          )}
         </Card>
-
-        {/* Activité récente */}
-        <Card padding="none">
-          <div className="border-b border-neutral-200 px-4 py-3">
-            <h2 className="text-sm font-semibold">Activité</h2>
-          </div>
-          <ul className="divide-y divide-neutral-100">
-            {MOCK_ACTIVITY.map((item) => (
-              <li
-                key={item.id}
-                className="flex items-center gap-3 px-4 py-3"
-              >
-                <span className="inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-500">
-                  {item.kind === "follow" ? (
-                    <CircleUser className="h-4 w-4" aria-hidden />
-                  ) : item.kind === "trade_published" ? (
-                    <ArrowUpRight className="h-4 w-4" aria-hidden />
-                  ) : (
-                    <Activity className="h-4 w-4" aria-hidden />
-                  )}
-                </span>
-                <div className="min-w-0 flex-1 text-sm">
-                  <span className="font-medium">{item.actor}</span>{" "}
-                  <span className="text-neutral-600">{item.message}</span>
-                </div>
-                <span className="flex-shrink-0 text-xs text-neutral-500">
-                  {item.ago}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </Card>
-
-        <footer className="pb-2 pt-4 text-center text-xs text-neutral-400">
-          Kairo · Phase 0 · données mockées
-        </footer>
       </div>
     </main>
   );
@@ -339,10 +327,13 @@ export default function DashboardPage() {
 // Volontairement non exporté : c'est un détail d'implémentation du dashboard.
 // Si on le réutilise ailleurs (page de profil, page d'instrument), on extraira.
 
-function TradeRow({ trade }: { trade: MockTrade }) {
+function TradeRow({ trade }: { trade: RecentTrade }) {
   const isDraft = trade.status === "draft";
-  const isProfit = trade.pnlValue > 0;
-  const isLoss = trade.pnlValue < 0;
+  const pnlValue =
+    trade.pnl_net === null ? null : Number(trade.pnl_net);
+  const hasPnl = pnlValue !== null && Number.isFinite(pnlValue);
+  const isProfit = hasPnl && pnlValue > 0;
+  const isLoss = hasPnl && pnlValue < 0;
   const valueClass = isProfit
     ? "text-success"
     : isLoss
@@ -374,7 +365,7 @@ function TradeRow({ trade }: { trade: MockTrade }) {
         <div className="text-[10px] uppercase tracking-wide text-neutral-400 sm:hidden">
           Entrée
         </div>
-        {formatPrice(trade.entryPrice, trade.assetClass)}
+        {formatPrice(trade.entry_price, trade.asset_class)}
       </div>
 
       {/* Current / exit price */}
@@ -383,21 +374,23 @@ function TradeRow({ trade }: { trade: MockTrade }) {
           {trade.status === "live" ? "Actuel" : "Sortie"}
         </div>
         <span className={isDraft ? "text-neutral-400" : ""}>
-          {isDraft ? "—" : formatPrice(trade.currentPrice, trade.assetClass)}
+          {isDraft
+            ? "—"
+            : formatPrice(trade.exit_price, trade.asset_class)}
         </span>
       </div>
 
-      {/* PnL */}
+      {/* PnL (€) + rendement (%) */}
       <div
         className={`col-span-4 text-right font-mono text-sm font-medium sm:col-span-3 ${valueClass}`}
       >
-        {isDraft ? (
+        {!hasPnl ? (
           <span className="text-neutral-400">—</span>
         ) : (
           <>
-            <div>{formatSigned(trade.pnlValue)}</div>
+            <div>{formatSigned(pnlValue)}</div>
             <div className="text-xs opacity-80">
-              {formatSignedPercent(trade.pnlPercent)}
+              {formatSignedPercent(trade.rendement_pct)}
             </div>
           </>
         )}

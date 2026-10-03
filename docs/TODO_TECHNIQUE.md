@@ -577,3 +577,22 @@ risque de redécouvrir si on n'a pas la trace.
     n'avait jamais été appliquée au code de production lui-même,
     seulement aux assertions. Leçon à étendre : appliquer aussi
     systématiquement aux checks SQL de production.
+
+
+## Leçons Supabase JS
+
+Pièges runtime côté client `.rpc()` qui ne sont pas détectés par le
+build TypeScript — uniquement visibles à l'usage réel ou à la revue
+explicite.
+
+- **`RETURNS numeric` (scalaire) vs `RETURNS TABLE` côté `.rpc()` Supabase JS**
+  (Phase 10 / Dashboard, piège détecté à la revue du câblage réel) :
+  - `RETURNS numeric` → `data` est directement la valeur (`number | string | null`)
+  - `RETURNS TABLE (...)` → `data` est un tableau d'objets (`Array<{...}>`)
+  - L'erreur naturelle : appliquer `[0]` à un scalaire. Le cast TypeScript
+    `as` ne protège pas — c'est un bug runtime silencieux (build OK,
+    affichage "—" partout). Vérifier la signature `returns` de chaque
+    RPC appelée avant d'indexer `data[0]`. Et tant qu'à faire, ne JAMAIS
+    écrire `(data ?? [])[0]` — si la donnée est absente, on veut `"—"`,
+    pas `0` (`null ?? []` → `[]` → `[0]` → `undefined`, `Number([]) === 0`
+    si on tente une coercition implicite via un fallback dangereux).
