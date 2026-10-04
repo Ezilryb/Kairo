@@ -37,6 +37,7 @@ import {
   TrendingUp,
   Wallet,
 } from "lucide-react";
+import Link from "next/link";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -249,11 +250,28 @@ export default async function DashboardPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary">Exporter</Button>
-            <Button variant="primary">
-              <Plus className="h-4 w-4" aria-hidden />
-              Nouveau trade
-            </Button>
+            {/*
+              Exporter : <a> natif (pas Next.js <Link>) parce que la cible
+              est une route API qui renvoie Content-Disposition: attachment,
+              forçant le navigateur à télécharger le JSON. <Link> sert aux
+              transitions client-side entre pages Next.js, ce qui n'a pas
+              de sens ici. Les cookies de session Supabase sont envoyés
+              automatiquement par le navigateur sur cette navigation, le
+              serveur vérifie getUser() côté route et force le bon filename
+              via le header.
+              Pattern <a><Button> identique à <Link><Button> rendu DOM
+              (cf. trades/[id]/page.tsx:267), cohérent avec le reste du
+              projet.
+            */}
+            <a href="/api/account/export">
+              <Button variant="secondary">Exporter</Button>
+            </a>
+            <Link href="/trades/new">
+              <Button variant="primary">
+                <Plus className="h-4 w-4" aria-hidden />
+                Nouveau trade
+              </Button>
+            </Link>
           </div>
         </header>
 
