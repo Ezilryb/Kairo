@@ -25,8 +25,8 @@
 // une future phase.
 //
 // Footer "Phase X" SUPPRIMÉ : audit A4, alignement avec le reste du
-// dashboard (les footers "Phase X" sont à retirer des autres pages
-// dans un round dédié, hors scope ici).
+// dashboard (les footers "Phase X" sont à retirer des autres pages dans
+// un round dédié, hors scope ici).
 // =============================================================================
 import {
   Activity,
@@ -223,7 +223,8 @@ export default async function DashboardPage() {
   // neutral si 0). On ne surcharge pas StatBlock.tone ici, on laisse la
   // fonction getTone interne faire son boulot à partir du delta — sauf
   // que V1 n'a pas de delta, donc on force tone via la prop.
-  const pnlNetNumber = pnlNetValue === null || pnlNetValue === undefined ? null : Number(pnlNetValue);
+  const pnlNetNumber =
+    pnlNetValue === null || pnlNetValue === undefined ? null : Number(pnlNetValue);
   const pnlTone =
     pnlNetNumber === null
       ? "neutral"
@@ -307,11 +308,13 @@ export default async function DashboardPage() {
               label="Drawdown max"
               value={formatSigned(drawdownValue)}
               icon={<Wallet className="h-4 w-4" />}
-              tone={drawdownValue === null || drawdownValue === undefined
-                ? "neutral"
-                : Number(drawdownValue) > 0
-                  ? "danger"
-                  : "neutral"}
+              tone={
+                drawdownValue === null || drawdownValue === undefined
+                  ? "neutral"
+                  : Number(drawdownValue) > 0
+                    ? "danger"
+                    : "neutral"
+              }
             />
           </Card>
         </section>
@@ -344,11 +347,17 @@ export default async function DashboardPage() {
 // ---- Sous-composant inline (row de trade) ----------------------------------
 // Volontairement non exporté : c'est un détail d'implémentation du dashboard.
 // Si on le réutilise ailleurs (page de profil, page d'instrument), on extraira.
+//
+// Phase 10 — row cliquable : wrapper sémantique <li> + <Link> portant le
+// grid. Le clic mène à /trades/[id] où vit l'écran de gestion du trade
+// (publication pour les drafts, transitions live→closed→archived pour
+// les autres, timeline immuable des trade_events pour tous).
+// hover:bg-neutral-50 pour le feedback visuel, transition-colors pour
+// fluidifier. <Link> rend un <a href> focusable nativement → clavier OK.
 
 function TradeRow({ trade }: { trade: RecentTrade }) {
   const isDraft = trade.status === "draft";
-  const pnlValue =
-    trade.pnl_net === null ? null : Number(trade.pnl_net);
+  const pnlValue = trade.pnl_net === null ? null : Number(trade.pnl_net);
   const hasPnl = pnlValue !== null && Number.isFinite(pnlValue);
   const isProfit = hasPnl && pnlValue > 0;
   const isLoss = hasPnl && pnlValue < 0;
@@ -359,60 +368,65 @@ function TradeRow({ trade }: { trade: RecentTrade }) {
       : "text-neutral-500";
 
   return (
-    <li className="grid grid-cols-12 items-center gap-3 px-4 py-3">
-      {/* Status + symbol + direction */}
-      <div className="col-span-12 flex items-center gap-2 sm:col-span-4">
-        <Badge tone={STATUS_TONE[trade.status]} size="sm">
-          {STATUS_LABEL[trade.status]}
-        </Badge>
-        <span className="font-medium">{trade.symbol}</span>
-        <span className="text-neutral-400" aria-hidden>
-          {trade.direction === "long" ? (
-            <ArrowUpRight className="inline h-3.5 w-3.5" />
-          ) : (
-            <ArrowDownRight className="inline h-3.5 w-3.5" />
-          )}
-        </span>
-        <span className="sr-only">
-          position {trade.direction === "long" ? "longue" : "courte"}
-        </span>
-      </div>
-
-      {/* Entry price */}
-      <div className="col-span-4 font-mono text-xs text-neutral-500 sm:col-span-3 sm:text-sm">
-        <div className="text-[10px] uppercase tracking-wide text-neutral-400 sm:hidden">
-          Entrée
-        </div>
-        {formatPrice(trade.entry_price, trade.asset_class)}
-      </div>
-
-      {/* Current / exit price */}
-      <div className="col-span-4 font-mono text-xs sm:col-span-2 sm:text-sm">
-        <div className="text-[10px] uppercase tracking-wide text-neutral-400 sm:hidden">
-          {trade.status === "live" ? "Actuel" : "Sortie"}
-        </div>
-        <span className={isDraft ? "text-neutral-400" : ""}>
-          {isDraft
-            ? "—"
-            : formatPrice(trade.exit_price, trade.asset_class)}
-        </span>
-      </div>
-
-      {/* PnL (€) + rendement (%) */}
-      <div
-        className={`col-span-4 text-right font-mono text-sm font-medium sm:col-span-3 ${valueClass}`}
+    <li>
+      <Link
+        href={`/trades/${trade.id}`}
+        className="grid grid-cols-12 items-center gap-3 px-4 py-3 hover:bg-neutral-50 transition-colors"
       >
-        {!hasPnl ? (
-          <span className="text-neutral-400">—</span>
-        ) : (
-          <>
-            <div>{formatSigned(pnlValue)}</div>
-            <div className="text-xs opacity-80">
-              {formatSignedPercent(trade.rendement_pct)}
-            </div>
-          </>
-        )}
-      </div>
+        {/* Status + symbol + direction */}
+        <div className="col-span-12 flex items-center gap-2 sm:col-span-4">
+          <Badge tone={STATUS_TONE[trade.status]} size="sm">
+            {STATUS_LABEL[trade.status]}
+          </Badge>
+          <span className="font-medium">{trade.symbol}</span>
+          <span className="text-neutral-400" aria-hidden>
+            {trade.direction === "long" ? (
+              <ArrowUpRight className="inline h-3.5 w-3.5" />
+            ) : (
+              <ArrowDownRight className="inline h-3.5 w-3.5" />
+            )}
+          </span>
+          <span className="sr-only">
+            position {trade.direction === "long" ? "longue" : "courte"}
+          </span>
+        </div>
+
+        {/* Entry price */}
+        <div className="col-span-4 font-mono text-xs text-neutral-500 sm:col-span-3 sm:text-sm">
+          <div className="text-[10px] uppercase tracking-wide text-neutral-400 sm:hidden">
+            Entrée
+          </div>
+          {formatPrice(trade.entry_price, trade.asset_class)}
+        </div>
+
+        {/* Current / exit price */}
+        <div className="col-span-4 font-mono text-xs sm:col-span-2 sm:text-sm">
+          <div className="text-[10px] uppercase tracking-wide text-neutral-400 sm:hidden">
+            {trade.status === "live" ? "Actuel" : "Sortie"}
+          </div>
+          <span className={isDraft ? "text-neutral-400" : ""}>
+            {isDraft
+              ? "—"
+              : formatPrice(trade.exit_price, trade.asset_class)}
+          </span>
+        </div>
+
+        {/* PnL (€) + rendement (%) */}
+        <div
+          className={`col-span-4 text-right font-mono text-sm font-medium sm:col-span-3 ${valueClass}`}
+        >
+          {!hasPnl ? (
+            <span className="text-neutral-400">—</span>
+          ) : (
+            <>
+              <div>{formatSigned(pnlValue)}</div>
+              <div className="text-xs opacity-80">
+                {formatSignedPercent(trade.rendement_pct)}
+              </div>
+            </>
+          )}
+        </div>
+      </Link>
     </li>
   );
 }
