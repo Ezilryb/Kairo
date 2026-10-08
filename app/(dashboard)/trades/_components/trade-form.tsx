@@ -16,6 +16,25 @@
 // Champs persos/psychologie volontairement non exposés ici (vides en
 // draft acceptable, à ajouter quand on aura l'écran de métadonnées
 // d'un trade). Idem pour leverage (défaut 1) et risk_percent (optionnel).
+//
+// VALIDATION (Phase 10 round 3) :
+//   La validation est gérée par pattern `touched` standard : les
+//   erreurs ne s'affichent que pour les champs que l'utilisateur a
+//   touchés (onBlur) ou après une tentative de soumission ratée
+//   (markAllTouched). Plus d'erreurs rouges au chargement de la page
+//   avec un form vide. Le `disabled={!isValid}` du bouton reste
+//   inchangé — on veut toujours bloquer la soumission d'un form
+//   invalide, seul l'AFFICHAGE des erreurs est gated par touched.
+//
+//   Comportement par mode :
+//     - create  : touched vide à l'init → 0 erreur visible. Au clic
+//                 sur "Créer le brouillon" avec form vide, markAllTouched
+//                 → 4 erreurs visibles (instrument + 3 numériques).
+//     - edit    : touched vide à l'init, validation(initialTrade) = {}
+//                 (sinon le trade ne serait pas en draft valide) → 0
+//                 erreur visible. Si l'utilisateur vide entry_price
+//                 et tabule hors du champ, l'erreur apparaît sur ce
+//                 champ uniquement.
 // =============================================================================
 "use client";
 
@@ -49,6 +68,17 @@ const EMPTY: TradeFormData = {
   notes: "",
 };
 
+// Champs dont on veut tracker l'état touched pour l'affichage des
+// erreurs. Garder cette liste courte — un touched par champ, pas
+// par sous-état. notes n'est pas dans la liste (champ optionnel,
+// aucune erreur possible).
+const TRACKED_FIELDS = [
+  "instrument_id",
+  "entry_price",
+  "quantity",
+  "capital",
+] as const;
+
 export function TradeForm({
   instruments,
   initialTrade,
@@ -69,14 +99,51 @@ export function TradeForm({
     initialTrade ?? { ...EMPTY, instrument_id: "" },
   );
   const [error, setError] = useState<string | null>(null);
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [pending, startTransition] = useTransition();
 
   const validation = validate(data);
+  // isValid reste calculé sur validation pure, pas sur touched — un form
+  // invalide ne peut pas être soumis même si l'utilisateur n'a pas
+  // encore vu les erreurs. touched gate uniquement l'AFFICHAGE.
   const isValid = Object.keys(validation).length === 0;
+
+  // Helper : marquer tous les champs comme touchés, utilisé au submit
+  // raté pour rendre visibles toutes les erreurs en une fois.
+  // Un objet "complet" plutôt qu'un updater functional pour rester
+  // idiomatique et lisible — touched n'est pas un état à merger.
+  const markAllTouched = () => {
+    setTouched(
+      TRACKED_FIELDS.reduce<Record<string, boolean>>(
+        (acc, field) => {
+          acc[field] = true;
+          return acc;
+        },
+        {},
+      ),
+    );
+  };
+
+  // Helper : marquer un champ comme touché au premier blur. Functional
+  // updater pour rester safe face à un double-blur rapide.
+  const markTouched = (field: string) => {
+    setTouched((t) => (t[field] ? t : { ...t, [field]: true }));
+  };
+
+  // Affichage d'une erreur : gated par touched pour éviter l'affichage
+  // au chargement. Retourne le message si le champ est touché ET en
+  // erreur, undefined sinon (cohérent avec le contrat du composant Field
+  // qui check `error ? ... : null`).
+  const showError = (field: string): string | undefined =>
+    touched[field] ? validation[field] : undefined;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!isValid) {
+      // Avant de bloquer, on révèle les erreurs : sans ça, un user qui
+      // clique "Créer le brouillon" sans avoir touché un seul champ
+      // verrait juste le bouton ne rien faire, sans comprendre pourquoi.
+      markAllTouched();
       setError("Corrige les champs en rouge avant de soumettre.");
       return;
     }
@@ -172,10 +239,14 @@ export function TradeForm({
             id="instrument"
             value={data.instrument_id}
             onChange={(e) => setData((d) => ({ ...d, instrument_id: e.target.value }))}
+            // onBlur déclenche le passage à touched : dès que l'utilisateur
+            // a interagi avec le select (focus puis blur sans choisir),
+            // l'erreur "Sélectionnez un instrument" devient visible.
+            onBlur={() => markTouched("instrument_id")}
             className={[
               "mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm text-neutral-900",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1",
-              validation.instrument_id
+              showError("instrument_id")
                 ? "border-danger-border focus-visible:border-danger focus-visible:ring-danger"
                 : "border-neutral-300 focus-visible:border-info focus-visible:ring-info",
             ].join(" ")}
@@ -201,8 +272,8 @@ export function TradeForm({
               </>
             )}
           </select>
-          {validation.instrument_id ? (
-            <p className="mt-1 text-xs text-danger">{validation.instrument_id}</p>
+          {showError("instrument_id") ? (
+            <p className="mt-1 text-xs text-danger">{showError("instrument_id")}</p>
           ) : null}
         </div>
       </Card>
@@ -245,7 +316,8 @@ export function TradeForm({
             min={0}
             value={data.entry_price}
             onChange={(v) => setData((d) => ({ ...d, entry_price: v }))}
-            error={validation.entry_price}
+            onBlur={() => markTouched("entry_price")}
+            error={showError("entry_price")}
           />
           <Field
             id="quantity"
@@ -255,7 +327,8 @@ export function TradeForm({
             min={0}
             value={data.quantity}
             onChange={(v) => setData((d) => ({ ...d, quantity: v }))}
-            error={validation.quantity}
+            onBlur={() => markTouched("quantity")}
+            error={showError("quantity")}
           />
           <Field
             id="capital"
@@ -265,7 +338,8 @@ export function TradeForm({
             min={0}
             value={data.capital}
             onChange={(v) => setData((d) => ({ ...d, capital: v }))}
-            error={validation.capital}
+            onBlur={() => markTouched("capital")}
+            error={showError("capital")}
             unit="€"
           />
         </div>
@@ -332,6 +406,7 @@ function Field({
   value,
   unit,
   onChange,
+  onBlur,
   error,
 }: {
   id: string;
@@ -342,6 +417,9 @@ function Field({
   value: number;
   unit?: string;
   onChange: (v: number) => void;
+  // Nouveau : onBlur passé en prop, déclenché par le parent via markTouched.
+  // Avant le fix, le Field n'avait pas de onBlur — touched n'existait pas.
+  onBlur?: () => void;
   error?: string;
 }) {
   return (
@@ -360,6 +438,7 @@ function Field({
             const v = parseFloat(e.target.value);
             onChange(Number.isFinite(v) ? v : 0);
           }}
+          onBlur={onBlur}
           className={[
             "block w-full rounded-lg border bg-white px-3 py-2 pr-8 text-sm text-neutral-900",
             "font-mono tabular-nums",
