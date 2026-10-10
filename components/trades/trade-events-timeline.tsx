@@ -3,7 +3,7 @@
 // Phase 9 — Finitions UI/UX (Proof of Performance, whitepaper notes finales)
 // Composant "Proof of Performance" — timeline immuable des trade_events.
 //
-// Cadrage chef (Phase 9 brief, point 1) :
+// Cadrage (Phase 9 brief, point 1) :
 //   "Rejoue trade_events triés par created_at croissant, avec pour chaque
 //   ligne le type d'event, l'horodatage DB, et old_values/new_values en
 //   résumé lisible (pas le JSON brut). Ajoute un indicateur d'intégrité
@@ -11,26 +11,43 @@
 //   hors de la fenêtre 60s, affiche 'Aucune modification hors fenêtre
 //   autorisée'."
 //
-// Le point de vente narratif : chaque timestamp est généré par Postgres
-// (`now()` côté DB), jamais par le navigateur — c'est ce qui rend la
-// preuve crédible. On ne fait que SURFAÇER cette garantie déjà présente
-// dans les triggers Phase 0 (log_sl_tp_changes, enforce_entry_price_immutability,
-// enforce_sl_tp_immutability) — pas de nouvelle migration SQL, pas de
-// nouvelle colonne, lecture pure de la table trade_events.
-//
 // Pourquoi un client component :
 //   - Fetch dynamique côté navigateur pour éviter de charger tous les
-//     events d'un trade dans le render server (séparation des concerns,
-//     cohérent avec mae-mfe-button.tsx)
-//   - Loading/empty/error states granulaires au niveau du composant
-//   - Pas d'état partagé avec le parent
+//     events d'un trade dans le render server.
+//   - Loading/empty/error states granulaires au niveau du composant.
+//   - Pas d'état partagé avec le parent.
 //
 // Garantie d'impartialité :
 //   trade_events est immuable par construction (trigger forbid_trade_events_mutation
 //   de la migration 0001). Le composant ne peut pas afficher de données
-//   modifiées — il SURFACE ce qui a été historisé par les triggers
-//   d'origine (création, publication, modifs SL/TP, partial_exit,
-//   transition). C'est exactement ce qu'on veut pour la preuve.
+//   modifiées — il SURFACE ce qui a été historisé par les triggers.
+//
+// Phase 10 (migration 023) :
+//   - Ajout colonne is_backfilled + metadata sur trade_events.
+//   - Référence de la fenêtre 60s = timestamp de l'event 'published',
+//     PAS trades.published_at (falsifiable par un UPDATE direct).
+//   - Détection publication directe (metadata.direct_insert_live=true).
+//   - Détection publication non tracée (status <> 'draft' mais aucun event
+//     'published' présent — état anormal post-023). Couvre tous les
+//     statuts non-draft (live, closed, forgotten, archived), pas
+//     seulement 'live' : un trade clôturé sans event 'published' est
+//     aussi un état anormal.
+//   - Tri déterministe : created_at, puis event_type. PostgREST trie les
+//     enums par ordre de DÉCLARATION (cf. migration 0001, 'created' est
+//     déclaré avant 'published').
+//   - Lecture parallèle events + status via Promise.all pour éviter le
+//     clignotement du badge "Brouillon non publié" le temps de la
+//     seconde requête (séquentiel avant).
+//   - Erreur de lecture status séparée : un échec RLS / réseau sur la
+//     lecture de status ne fait plus passer le composant en état
+//     "Brouillon non publié" — il affiche "Statut indéterminé".
+//
+// Note audit : le trigger `enforce_sl_tp_immutability` n'existe PAS
+// en prod. Le seul trigger SL/TP est `log_sl_tp_changes` qui
+// HISTORISE sans verrouiller. La vérif 60s de ce composant porte donc
+// uniquement sur entry_price (post-60s par enforce_entry_price_immutability).
+// Pour les autres champs (SL/TP, quantity, capital, direction,
+// instrument_id) : aucun verrou en base aujourd'hui (cf. plan 10.0).
 // =============================================================================
 "use client";
 
@@ -43,11 +60,6 @@ import { createClient } from "@/lib/supabase/client";
 // Types
 // -----------------------------------------------------------------------------
 
-// Les 11 valeurs de public.trade_event_type (cf. migration 0001, §02).
-// Garder ce type en sync avec l'enum PostgreSQL — si on en ajoute un côté
-// SQL, il faut l'ajouter ici + dans EVENT_LABELS. Le compilateur TS ne
-// pourra pas attraper l'oubli côté SQL, mais l'audit visuel du composant
-// rendu rattrapera le cas (label absent → "Type inconnu").
 type TradeEventType =
   | "created"
   | "published"
@@ -67,16 +79,12 @@ interface TradeEventRow {
   event_type: TradeEventType;
   old_values: Record<string, unknown> | null;
   new_values: Record<string, unknown> | null;
-  created_at: string; // ISO 8601 depuis timestamptz Postgres
+  is_backfilled: boolean;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
 }
 
-// trade_events est lié à un trade par trade_id. On charge juste la fenêtre
-// publiée (published_at + 60s suffisent pour la vérif d'intégrité côté
-// client ; la cohérence DB reste garantie par les triggers).
-interface TradeRow {
-  id: string;
-  published_at: string | null;
-}
+type TradeStatusResult = "draft" | "live" | "closed" | "forgotten" | "archived" | null;
 
 // -----------------------------------------------------------------------------
 // Libellés et tons
@@ -96,9 +104,6 @@ const EVENT_LABELS: Record<TradeEventType, string> = {
   archived: "Trade archivé",
 };
 
-// Couleur du dot timeline par type d'event. On n'utilise QUE les tokens
-// sémantiques (pas de Tailwind utilities directes sur les dots), pour
-// rester aligné sur le design system établi.
 const EVENT_TONES: Record<TradeEventType, BadgeTone> = {
   created: "neutral",
   published: "info",
@@ -113,12 +118,6 @@ const EVENT_TONES: Record<TradeEventType, BadgeTone> = {
   archived: "neutral",
 };
 
-// Couleur du dot sur la timeline verticale (cercle de 8px à gauche de
-// chaque ligne). On garde un mapping séparé des badges pour pouvoir
-// donner un signal visuel plus saturé sur le dot que sur le badge
-// (le dot doit "peser" sur la timeline, le badge doit rester léger).
-// Phase 9 round 4 : utilise les tokens `warning` au lieu des utilitaires
-// Tailwind `amber-*` bruts, conformément à l'alignement design system.
 const EVENT_DOT_CLASSES: Record<TradeEventType, string> = {
   created: "bg-neutral-400 ring-neutral-200",
   published: "bg-info ring-info-border",
@@ -137,14 +136,6 @@ const EVENT_DOT_CLASSES: Record<TradeEventType, string> = {
 // Helpers de rendu
 // -----------------------------------------------------------------------------
 
-/**
- * Formate un timestamp ISO 8601 en chaîne française lisible.
- * On utilise un format explicite plutôt que toLocaleString() pour que le
- * rendu soit stable d'un navigateur à l'autre (les locales "fr-FR" entre
- * Node, Chrome et Safari varient légèrement).
- *
- * Format : "15 sept. 2026 · 14:32:07"
- */
 function formatTimestamp(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -162,12 +153,6 @@ function formatTimestamp(iso: string): string {
   return `${day} ${month} ${year} · ${hh}:${mm}:${ss}`;
 }
 
-/**
- * Formate une valeur numérique pour l'affichage. Les valeurs viennent de
- * JSONB (donc déjà sérialisées en string par Supabase pour les numeric).
- * On tente un Number() pour les formater avec toLocaleString, fallback
- * sur la string brute pour les autres types (text, bool).
- */
 function formatValue(v: unknown): string {
   if (v === null || v === undefined) return "—";
   if (typeof v === "number" && Number.isFinite(v)) {
@@ -184,17 +169,6 @@ function formatValue(v: unknown): string {
   return JSON.stringify(v);
 }
 
-/**
- * Traduit un objet JSONB old_values/new_values en une chaîne lisible
- * "clé : ancien → nouveau". Si une seule des deux valeurs est présente,
- * affiche seulement l'existante.
- *
- * Exemples :
- *   { stop_loss: 42000 } → { stop_loss: 41500 }
- *     → "Stop Loss : 42 000 → 41 500"
- *   { entry_price: 100 } → null
- *     → "Prix d'entrée : 100 → —"
- */
 function describeDiff(
   eventType: TradeEventType,
   oldValues: Record<string, unknown> | null,
@@ -202,9 +176,6 @@ function describeDiff(
 ): string | null {
   if (!oldValues && !newValues) return null;
 
-  // Mapping type d'event → label de champ lisible. Pour les events qui
-  // touchent plusieurs champs (info_modified), on laisse les clés JSONB
-  // parler d'elles-mêmes avec un capitalize().
   const FIELD_LABELS: Record<string, string> = {
     entry_price: "Prix d'entrée",
     stop_loss: "Stop Loss",
@@ -247,7 +218,7 @@ function describeDiff(
 // Composant principal
 // -----------------------------------------------------------------------------
 
-const WINDOW_MS = 60 * 1000; // 60 s — fenêtre scalping whitepaper §04
+const WINDOW_MS = 60 * 1000;
 
 export interface TradeEventsTimelineProps {
   tradeId: string;
@@ -255,12 +226,14 @@ export interface TradeEventsTimelineProps {
 
 export function TradeEventsTimeline({ tradeId }: TradeEventsTimelineProps) {
   const [events, setEvents] = useState<TradeEventRow[] | null>(null);
-  const [publishedAt, setPublishedAt] = useState<string | null>(null);
+  const [tradeStatus, setTradeStatus] = useState<TradeStatusResult>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   useEffect(() => {
     setError(null);
+    setStatusError(null);
     startTransition(async () => {
       const supabase = createClient();
       const {
@@ -272,57 +245,44 @@ export function TradeEventsTimeline({ tradeId }: TradeEventsTimelineProps) {
         return;
       }
 
-      // published_at du trade — uniquement la colonne nécessaire pour
-      // calculer la fenêtre 60 s côté client (vérif d'intégrité).
-      // Pattern lecture séparée (pas de jointure) pour les mêmes raisons
-      // que /trades/[id]/page.tsx (cf. TODO_TECHNIQUE leçon Phase 5).
-      //
-      // OWNER-ONLY CETTE PHASE (Phase 9 round 2, suite audit composant) :
-      // on filtre explicitement par user_id = auth.uid() côté client.
-      // Raison : la policy RLS trade_events a été alignée Phase 7 par
-      // la migration 020, MAIS le composant peut être réutilisé dans
-      // d'autres contextes (chart/replay, futur feed) où le fetch
-      // direct client pourrait extraire des events d'un trade public
-      // d'un autre user (fuite d'old_values/new_values : quantity,
-      // fees, notes, etc.). Le filtrage explicite garantit que le
-      // composant est owner-only quel que soit son contexte de montage.
-      // Quand un PoP public sera cadré (dette Phase 9 TODO_TECHNIQUE),
-      // ce filtre devra sauter ET être remplacé par un masquage SQL des
-      // champs sensibles (cf. migration 020 commentaire).
-      const { data: trade, error: tradeError } = await supabase
-        .from("trades")
-        .select("id, published_at, user_id")
-        .eq("id", tradeId)
-        .eq("user_id", user.id)
-        .maybeSingle();
-      if (tradeError) {
-        setError(tradeError.message);
-        return;
-      }
-      if (!trade) {
-        // Pas le proprio, ou trade inexistant. On renvoie un message
-        // générique plutôt que distinguer les deux cas (pas de leak
-        // d'info business sur l'existence de trades d'autres users).
-        setError("Trade introuvable ou non autorisé.");
-        return;
-      }
-      setPublishedAt((trade as TradeRow).published_at ?? null);
+      // Lecture parallèle : events + status. Avant c'était séquentiel et
+      // le badge "Brouillon non publié" clignotait le temps que la
+      // 2e requête revienne. Avec Promise.all, les 2 lectures sont en
+      // vol simultanément, on calcule le bon état dès la résolution.
+      const [eventsResult, statusResult] = await Promise.all([
+        supabase
+          .from("trade_events")
+          .select("id, trade_id, event_type, old_values, new_values, is_backfilled, metadata, created_at")
+          .eq("trade_id", tradeId)
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: true })
+          .order("event_type", { ascending: true }),
+        supabase
+          .from("trades")
+          .select("status")
+          .eq("id", tradeId)
+          .eq("user_id", user.id)
+          .maybeSingle(),
+      ]);
 
-      // trade_events : lecture de l'historique immutable.
-      // MÊME FILTRE OWNER-ONLY que ci-dessus : double sécurité.
-      // .order('created_at', { ascending: true }) = ordre chronologique,
-      // exactement ce qu'on veut pour la timeline.
-      const { data: eventsData, error: eventsError } = await supabase
-        .from("trade_events")
-        .select("id, trade_id, event_type, old_values, new_values, created_at")
-        .eq("trade_id", tradeId)
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: true });
-      if (eventsError) {
-        setError(eventsError.message);
+      if (eventsResult.error) {
+        setError(eventsResult.error.message);
         return;
       }
-      setEvents((eventsData as TradeEventRow[]) ?? []);
+      setEvents((eventsResult.data as TradeEventRow[]) ?? []);
+
+      // Status : on distingue 3 cas.
+      //   - OK et trade trouvé : tradeStatus = le statut retourné.
+      //   - OK et trade non trouvé : tradeStatus = null (trade inexistant
+      //     ou RLS bloque). isStatusUnknown reste false — c'est juste
+      //     un trade absent.
+      //   - Erreur RLS / réseau : tradeStatus = null ET statusError
+      //     non null → le composant affiche "Statut indéterminé"
+      //     plutôt que de retomber silencieusement sur "Brouillon".
+      if (statusResult.error) {
+        setStatusError(statusResult.error.message);
+      }
+      setTradeStatus((statusResult.data?.status as TradeStatusResult) ?? null);
     });
   }, [tradeId]);
 
@@ -360,9 +320,6 @@ export function TradeEventsTimeline({ tradeId }: TradeEventsTimelineProps) {
   }
 
   // ----- Empty ------------------------------------------------------------
-  // Un trade SANS event : ce cas ne devrait pas exister en pratique (le
-  // trigger AFTER INSERT sur trades crée un event 'created' automatiquement,
-  // migration 0001). Mais on reste robuste.
   if (events && events.length === 0) {
     return (
       <Card>
@@ -375,27 +332,47 @@ export function TradeEventsTimeline({ tradeId }: TradeEventsTimelineProps) {
     );
   }
 
-  // ----- Vérification d'intégrité ----------------------------------------
-  // On cherche les modifications post-publication (entry/sl/tp_modified)
-  // dont le timestamp serait > published_at + 60s. Si on en trouve, on
-  // affiche une alerte. Sinon, on affiche la confirmation positive.
-  //
-  // IMPORTANT — cette vérif est pédagogique, pas un nouveau garde-fou :
-  // les triggers enforce_entry_price_immutability et
-  // enforce_sl_tp_immutability (migration 002) BLOQUENT déjà côté DB
-  // toute modification hors fenêtre. Si la vérif client remontait un
-  // problème, ça indiquerait soit un bug des triggers, soit une
-  // manipulation directe de la base. C'est un détecteur, pas un
-  // mécanisme de sécurité.
+  // ----- Logique du badge -----------------------------------------------
+  // Hiérarchie par ordre de priorité décroissante :
+  //   1. Anomalie détectée (danger) — au moins une modif SL/TP/entry
+  //      hors fenêtre 60s post-publication
+  //   2. Publication directe (warning) — event 'published' avec
+  //      metadata.direct_insert_live=true
+  //   3. Historique reconstitué (warning) — au moins un event is_backfilled,
+  //      pas d'anomalie, pas de publication directe
+  //   4. Intégrité vérifiée (success) — pas d'anomalie, pas de
+  //      publication directe, aucun event backfillé, event 'published' présent
+  //   5. Publication non tracée (warning) — status <> 'draft' mais aucun
+  //      event 'published' (anormal post-023). On couvre tous les statuts
+  //      non-draft (live, closed, forgotten, archived), pas seulement
+  //      'live' : un trade clôturé sans event 'published' est aussi
+  //      un état anormal (migration 023 non appliquée / backfill raté).
+  //   6. Statut indéterminé (warning) — la lecture de status a échoué
+  //      (RLS, réseau, etc.). On n'invente pas "Brouillon".
+  //   7. Brouillon non publié (neutral) — status = 'draft' (lu OK),
+  //      pas encore d'event 'published'.
+
+  const publishedEvent = (events ?? []).find((e) => e.event_type === "published");
+  const publishedTimestamp = publishedEvent?.created_at ?? null;
+  const windowEnd = publishedTimestamp
+    ? new Date(publishedTimestamp).getTime() + WINDOW_MS
+    : null;
   const pmsEvents = ["entry_modified", "sl_modified", "tp_modified"] as const;
-  const windowEnd =
-    publishedAt ? new Date(publishedAt).getTime() + WINDOW_MS : null;
   const outOfWindow = (events ?? []).filter((e) => {
     if (!pmsEvents.includes(e.event_type as (typeof pmsEvents)[number])) return false;
     if (windowEnd === null) return false;
     return new Date(e.created_at).getTime() > windowEnd;
   });
-  const integrityOk = outOfWindow.length === 0 && publishedAt !== null;
+
+  const hasAnomaly = outOfWindow.length > 0;
+  const hasBackfilled = (events ?? []).some((e) => e.is_backfilled);
+  const isDirectInsertLive =
+    publishedEvent?.metadata != null &&
+    (publishedEvent.metadata as Record<string, unknown>).direct_insert_live === true;
+  const isPublished = publishedTimestamp !== null;
+  const isStatusNonDraft = tradeStatus !== null && tradeStatus !== "draft";
+  const isPublicationUntracked = isStatusNonDraft && !isPublished;
+  const isStatusUnknown = statusError !== null;
 
   // ----- Render -----------------------------------------------------------
   return (
@@ -409,35 +386,76 @@ export function TradeEventsTimeline({ tradeId }: TradeEventsTimelineProps) {
             n&apos;a été posé par ton navigateur.
           </p>
         </div>
-        {integrityOk ? (
+        {hasAnomaly ? (
+          <Badge tone="danger" size="sm">
+            ⚠ Anomalie détectée
+          </Badge>
+        ) : isDirectInsertLive ? (
+          <Badge tone="warning" size="sm">
+            ⓘ Publication directe
+          </Badge>
+        ) : hasBackfilled ? (
+          <Badge tone="warning" size="sm">
+            ⓘ Historique reconstitué
+          </Badge>
+        ) : isPublished ? (
           <Badge tone="success" size="sm">
             ✓ Intégrité vérifiée
           </Badge>
-        ) : publishedAt === null ? (
-          <Badge tone="neutral" size="sm">
-            Brouillon non publié
+        ) : isPublicationUntracked ? (
+          <Badge tone="warning" size="sm">
+            ⓘ Publication non tracée
+          </Badge>
+        ) : isStatusUnknown ? (
+          <Badge tone="warning" size="sm">
+            ⓘ Statut indéterminé
           </Badge>
         ) : (
-          <Badge tone="danger" size="sm">
-            ⚠ Anomalie détectée
+          <Badge tone="neutral" size="sm">
+            Brouillon non publié
           </Badge>
         )}
       </div>
 
-      {/* Indicateur d'intégrité détaillé */}
-      {integrityOk ? (
-        <p className="mt-3 text-xs text-neutral-600">
-          Aucune modification hors de la fenêtre autorisée (60 s après
-          publication).
-        </p>
-      ) : outOfWindow.length > 0 ? (
+      {hasAnomaly ? (
         <p
           role="alert"
           className="mt-3 rounded-md border border-danger-border bg-danger-subtle px-3 py-2 text-xs text-danger"
         >
           ⚠ {outOfWindow.length} modification(s) détectée(s) hors fenêtre
           autorisée. La cohérence de l&apos;historique peut être compromise.
-          Contacte le support si ce cas se présente.
+        </p>
+      ) : isDirectInsertLive ? (
+        <p className="mt-3 text-xs text-neutral-600">
+          Ce trade a été inséré directement avec <code>status = &apos;live&apos;</code>
+          (sans passer par <code>publish_trade</code>). L&apos;event
+          <code> published</code> a été posé au moment de l&apos;INSERT, mais la
+          fenêtre de 60 s ne s&apos;applique pas (pas de transition
+          draft → live). Traité comme publication non contrôlée.
+        </p>
+      ) : hasBackfilled ? (
+        <p className="mt-3 text-xs text-neutral-600">
+          L&apos;historique a été reconstitué à partir de <code>trades.created_at</code> et
+          <code> trades.published_at</code> (migration de rattrapage). Les events
+          antérieurs à cette migration ne sont pas garantis exhaustifs.
+        </p>
+      ) : isPublished ? (
+        <p className="mt-3 text-xs text-neutral-600">
+          Aucune modification hors de la fenêtre autorisée (60 s après
+          publication).
+        </p>
+      ) : isPublicationUntracked ? (
+        <p className="mt-3 text-xs text-neutral-600">
+          Le trade a un statut non-draft (status &lt;&gt; &apos;draft&apos;) en base, mais aucun
+          événement <code>published</code> n&apos;a été historisé. État anormal
+          post-migration 023 — à investiguer (trigger désactivé,
+          manipulation directe, etc.).
+        </p>
+      ) : isStatusUnknown ? (
+        <p className="mt-3 text-xs text-neutral-600">
+          Lecture du statut du trade impossible : {statusError}
+          {". "}L&apos;historique reste affiché mais on ne peut pas déterminer
+          s&apos;il est normal.
         </p>
       ) : (
         <p className="mt-3 text-xs text-neutral-500">
@@ -446,7 +464,6 @@ export function TradeEventsTimeline({ tradeId }: TradeEventsTimelineProps) {
         </p>
       )}
 
-      {/* Timeline */}
       <ol
         className="relative mt-6 space-y-4 border-l border-neutral-200 pl-6"
         aria-label="Historique immuable du trade"
@@ -459,7 +476,6 @@ export function TradeEventsTimeline({ tradeId }: TradeEventsTimelineProps) {
           const diff = describeDiff(event.event_type, event.old_values, event.new_values);
           return (
             <li key={event.id} className="relative">
-              {/* Dot de la timeline : ring coloré pour halo, bg pour le centre */}
               <span
                 aria-hidden
                 className={`absolute -left-[31px] top-1.5 inline-block h-3 w-3 rounded-full ring-4 ${dotClass}`}
@@ -475,6 +491,11 @@ export function TradeEventsTimeline({ tradeId }: TradeEventsTimelineProps) {
                 >
                   {formatTimestamp(event.created_at)}
                 </time>
+                {event.is_backfilled ? (
+                  <span className="rounded-full bg-warning-subtle px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-warning">
+                    reconstitué
+                  </span>
+                ) : null}
               </div>
               {diff ? (
                 <p className="mt-1 text-sm text-neutral-700">{diff}</p>
