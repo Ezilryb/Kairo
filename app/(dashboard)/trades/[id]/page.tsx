@@ -7,8 +7,18 @@
 // d'autres utilisateurs, le `.eq("user_id", user.id)` explicite bloque
 // le cas "j'ai deviné l'id d'un trade public d'un autre user", même
 // pattern défense en profondeur que partout ailleurs) + l'instrument
-// associé via jointure Supabase. Pas de `notFound()` silencieux : on
-// préfère 404 explicite, pas de leak d'existence.
+// associé via 2 queries séparées (cf. commentaire migration 003).
+//
+// Phase 10 — carte "Résultat" + RPC trade_metrics :
+//   - On appelle la RPC SECURITY INVOKER public.trade_metrics(p_trade_id)
+//     pour lire le PnL, le R-multiple et le risque initial. La RPC
+//     filtre user_id = auth.uid() (un tiers reçoit 0 ligne).
+//   - Si la RPC échoue ou ne renvoie rien (base en retard, RPC pas
+//     encore déployée), la page s'affiche normalement SANS la carte
+//     Résultat : aucune erreur bloquante côté UI.
+//   - Le `quote_currency` de l'instrument est joint à la lecture pour
+//     libeller « devise de cotation » du PnL (USDT pour BTCUSDT, USD
+//     pour EURUSD, NULL pour stocks/ETFs → libellé sans unité).
 //
 // Rendu selon `status` :
 //   - 'draft'     : vue lecture + lien vers /trades/[id]/edit + bouton
@@ -16,14 +26,10 @@
 //   - 'live' in   : vue lecture + TradeLiveEdit (countdown + form
 //     window        entry_price/SL/TP/notes)
 //   - 'live' hors : vue lecture + badge "verrouillé"
-//   - autres      : vue lecture simple (closed/forgotten/archived : ces
-//                   états auront leur écran de gestion dédié en Point D+,
-//                   pour l'instant on les affiche read-only sans crash)
-//
-// Calcul de la fenêtre 60 s : fait côté serveur au render, le client
-// prend le relais avec son propre setInterval. La valeur initiale
-// serveur évite le flash "60 s" sur une page déjà à 55 s si le render
-// a pris du temps.
+//   - 'closed'    : vue lecture + carte Résultat + bouton Archiver
+//   - 'archived'  : vue lecture + carte Résultat (archive = simple
+//                   conservation post-clôture, whitepaper §04)
+//   - 'forgotten' : vue lecture + boutons Réactiver/Clôturer
 // =============================================================================
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -34,6 +40,10 @@ import { TradePublishButton } from "../_components/trade-publish-button";
 import { TradeLiveEdit } from "../_components/trade-live-edit";
 import { TradeTransitionButton } from "../_components/trade-transition-button";
 import { TradeEventsTimeline } from "@/components/trades/trade-events-timeline";
+import {
+  TradeResultCard,
+  type TradeMetrics,
+} from "@/components/trades/trade-result-card";
 
 const WINDOW_MS = 60 * 1000;
 
@@ -53,17 +63,6 @@ export default async function TradeDetailPage({
   } = await supabase.auth.getUser();
   if (!user) return null;
 
-  // Charge le trade par id. `.eq("user_id", user.id)` explicite en plus
-  // de la RLS : bloque le cas tordu "j'ai deviné l'id d'un trade public
-  // d'un autre user".
-  //
-  // Note : on NE fait PAS de jointure `instrument:instruments(...)` ici.
-  // L'inférence de type de supabase-js ne reconnaît pas la jointure avec
-  // un select string et renvoie `GenericStringError`, ce qui casse
-  // toute la suite du code (accès aux colonnes du trade). On préfère
-  // 2 queries séparées (le trade + l'instrument par son id) — explicite,
-  // type-safe, et le coût d'une query supplémentaire est négligeable
-  // (instruments en lecture publique, index sur PK).
   const { data: trade, error: tradeError } = await supabase
     .from("trades")
     .select("id, status, direction, entry_price, stop_loss, take_profit, quantity, leverage, capital, risk_percent, fees, slippage, published_at, opened_at, closed_at, last_activity_at, notes, instrument_id")
@@ -74,24 +73,59 @@ export default async function TradeDetailPage({
   if (tradeError) return notFound();
   if (!trade) return notFound();
 
-  // 2e query : l'instrument pour afficher symbol + name. Lecture
-  // publique (policy "instruments: lecture publique" → using (true)),
-  // pas de filtre RLS à appliquer côté serveur.
+  // 2e query : l'instrument pour afficher symbol + name + asset_class
+  // + quote_currency. Lecture publique (policy "instruments: lecture
+  // publique" → using (true)), pas de filtre RLS à appliquer côté
+  // serveur. `quote_currency` est nullable (cf. instruments dans
+  // 20260821000001_initial_schema.sql lignes 102-103) : NULL pour les
+  // stocks/ETFs du seed 022, non-NULL pour les paires crypto/forex.
   const { data: instrument } = await supabase
     .from("instruments")
-    .select("symbol, name, asset_class")
+    .select("symbol, name, asset_class, quote_currency")
     .eq("id", trade.instrument_id)
     .maybeSingle();
 
+  // 3e query : trade_metrics(p_trade_id) — RPC SECURITY INVOKER filtrée
+  // par user_id. Renvoie 0 ligne pour un tiers. Si la RPC n'existe
+  // pas encore — base en retard par rapport au site — ou si l'appel
+  // échoue, on ne casse PAS la page : on continue sans métriques, la
+  // carte Résultat ne s'affiche pas, le reste de la page reste lisible.
+  const { data: metricsRows, error: metricsError } = await supabase.rpc(
+    "trade_metrics",
+    { p_trade_id: trade.id }
+  );
+  // Premier (et seul) élément du tableau, ou null. Normalisation des
+  // numériques PostgREST (numeric sérialisé en nombre JSON, mais on
+  // reste défensif si le client change de format) en number pour la
+  // carte.
+  const rawMetrics = !metricsError && Array.isArray(metricsRows) && metricsRows.length > 0
+    ? metricsRows[0]
+    : null;
+  const metrics: TradeMetrics | null = rawMetrics
+    ? {
+        status: rawMetrics.status,
+        exit_price: toNumberOrNull(rawMetrics.exit_price),
+        pnl_gross: toNumberOrNull(rawMetrics.pnl_gross),
+        pnl_net: toNumberOrNull(rawMetrics.pnl_net),
+        rendement_pct: toNumberOrNull(rawMetrics.rendement_pct),
+        r_multiple: toNumberOrNull(rawMetrics.r_multiple),
+        risk_pct: toNumberOrNull(rawMetrics.risk_pct),
+        fees_known: rawMetrics.fees_known === true,
+        slippage_known: rawMetrics.slippage_known === true,
+      }
+    : null;
+
   // Calcul de la fenêtre 60 s côté serveur.
-  //   - status === 'live' : on est publié
-  //   - published_at !== null : toujours vrai pour un trade live, mais
-  //     on reste explicite
-  //   - now() < published_at + 60 s : on est encore dans la fenêtre
   const publishedAtMs = trade.published_at
     ? new Date(trade.published_at).getTime()
     : 0;
   const windowEndMs = publishedAtMs + WINDOW_MS;
+  // Date.now() au render : préexistant (l'original l'avait déjà), la
+  // valeur initiale du countdown est donnée au composant client qui
+  // prend le relais avec son setInterval. eslint-disable ciblé sur
+  // cette ligne — à refactorer en sous-composant client si on veut
+  // un calcul exact à l'arrivée sur la page.
+  // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
   const isInWindow =
     trade.status === "live" &&
@@ -100,6 +134,17 @@ export default async function TradeDetailPage({
   const initialRemainingSeconds = isInWindow
     ? Math.max(0, Math.floor((windowEndMs - nowMs) / 1000))
     : 0;
+
+  // Le "Risque initial (%)" est lu depuis metrics.risk_pct (calculé par
+  // la base à la lecture : |entry - stop_loss| * initial_quantity /
+  // initial_capital * 100, NULL si pas de stop_loss ou capital nul).
+  // Règle : pas de stop loss = pas de risque affiché. Le fallback sur
+  // trade.risk_percent ne joue QUE si metrics est entièrement absent
+  // (rétro-compat base en retard) — jamais si metrics.risk_pct est
+  // explicitement NULL (le trade n'a pas de stop_loss, on l'affiche "—").
+  const initialRiskPct = metrics ? metrics.risk_pct : (
+    trade.risk_percent === null ? null : Number(trade.risk_percent)
+  );
 
   return (
     <main className="min-h-screen bg-neutral-50">
@@ -129,7 +174,7 @@ export default async function TradeDetailPage({
         <Card>
           <h2 className="text-sm font-semibold">Détails du trade</h2>
           <dl className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-            <DetailRow label="Prix d'entrée" value={formatNumber(trade.entry_price)} />
+            <DetailRow label="Prix d&apos;entrée" value={formatNumber(trade.entry_price)} />
             <DetailRow
               label="Stop Loss"
               value={
@@ -153,11 +198,11 @@ export default async function TradeDetailPage({
               value={trade.leverage ? `×${formatNumber(trade.leverage)}` : "—"}
             />
             <DetailRow
-              label="Risque (%)"
+              label="Risque initial (%)"
               value={
-                trade.risk_percent === null
+                initialRiskPct === null
                   ? "—"
-                  : `${formatNumber(trade.risk_percent)} %`
+                  : `${formatNumber(initialRiskPct, 2)} %`
               }
             />
             <DetailRow
@@ -189,16 +234,20 @@ export default async function TradeDetailPage({
 
         {/* Preuve de performance (Phase 9) — timeline immuable des
             trade_events. Lecture pure, aucune migration. Affichée pour
-            TOUS les statuts (même un brouillon a au minimum un event
-            'created') — c'est ce qui rend la preuve universelle. */}
+            TOUS les statuts. */}
         <TradeEventsTimeline tradeId={trade.id} />
 
-        {/* Actions : transitions manuelles selon statut. La table des
-            transitions valides est codée dans le RPC transition_trade
-            (migration 03), on n'expose côté UI QUE les boutons qui
-            correspondent à des transitions autorisées — pas la peine
-            de proposer un bouton qui se ferait rejeter par construction.
-            Le RPC reste la garde ultime au cas où. */}
+        {/* Carte "Résultat" — affichée UNIQUEMENT pour un trade clôturé
+            ou archivé. Si metrics === null (RPC échoue ou absente),
+            la carte ne s'affiche pas — la page reste fonctionnelle. */}
+        {metrics && (metrics.status === "closed" || metrics.status === "archived") ? (
+          <TradeResultCard
+            metrics={metrics}
+            quoteCurrency={instrument?.quote_currency ?? null}
+          />
+        ) : null}
+
+        {/* Actions : transitions manuelles selon statut. */}
         {trade.status === "live" ||
         trade.status === "forgotten" ||
         trade.status === "closed" ? (
@@ -215,7 +264,11 @@ export default async function TradeDetailPage({
                   tradeId={trade.id}
                   targetStatus="closed"
                   label="Clôturer le trade"
-                  confirmMessage="Clôturer ce trade ? Le prix de clôture, les frais et le PnL peuvent encore être édités depuis l'écran de trade (Point D+)."
+                  // Le prix de sortie est saisi dans le dialog
+                  // (slot `form` du ConfirmDialog). Le message
+                  // annonce la saisie obligatoire et la conséquence
+                  // immédiate (PnL calculé à la clôture).
+                  confirmMessage="Indiquez le prix de sortie. Le PnL sera calculé et affiché dès la confirmation."
                   variant="secondary"
                   assetClass={instrument?.asset_class}
                 />
@@ -233,7 +286,7 @@ export default async function TradeDetailPage({
                     tradeId={trade.id}
                     targetStatus="closed"
                     label="Clôturer"
-                    confirmMessage="Clôturer ce trade oublié ? Une fois clôturé, il ne sera plus réactivable (closed → archived uniquement)."
+                    confirmMessage="Indiquez le prix de sortie. Le PnL sera calculé et affiché dès la confirmation."
                     variant="secondary"
                     assetClass={instrument?.asset_class}
                   />
@@ -329,11 +382,6 @@ function StatusBadge({
   status: string;
   isInWindow: boolean;
 }) {
-  // On s'aligne sur les classes du Badge du design system sans
-  // l'importer directement : ce badge a une logique conditionnelle
-  // (live in-window vs out-of-window) que le Badge générique ne gère
-  // pas. Si on importe Badge, on n'utilise pas ses variantes, donc
-  // autant rester inline.
   const config: Record<string, { label: string; classes: string }> = {
     draft: {
       label: "Brouillon",
@@ -342,11 +390,6 @@ function StatusBadge({
     live: isInWindow
       ? {
           label: "Live · fenêtre scalping",
-          // Pas de token "warning" dans le design system (seulement
-          // success/danger/info). On reste sur info pour un état
-          // nominal (le trade est publié, dans la fenêtre, tout va
-          // bien). bg-info-subtle est déjà utilisé ailleurs (cf.
-          // TradeForm, TradeLiveEdit) pour la même raison.
           classes: "bg-info-subtle text-info",
         }
       : {
@@ -355,15 +398,8 @@ function StatusBadge({
         },
     closed: {
       label: "Clôturé",
-      // Convention UI (cf. TODO_TECHNIQUE.md, section "Conventions
-      // UI") : les badges de statut encodent le CYCLE DE VIE du trade,
-      // jamais l'issue financière. Un trade clôturé peut l'être à
-      // perte, le badge ne le dit pas — c'est le PnL affiché ailleurs
-      // sur l'écran qui le porte, en couleur. Teinter `closed` en
-      // success fait croire qu'un trade clôturé est forcément gagnant,
-      // c'est faux. Bug déjà corrigé sur le dashboard mocké en
-      // Phase 0, re-perdu en atterrissant ici — d'où la convention
-      // documentée pour qu'on arrête de le perdre.
+      // Convention UI (cf. TODO_TECHNIQUE.md) : les badges encodent le
+      // CYCLE DE VIE du trade, jamais l'issue financière.
       classes: "bg-neutral-100 text-neutral-700",
     },
     forgotten: {
@@ -408,18 +444,16 @@ function DetailRow({
   );
 }
 
-// numeric(24, 8) → string côté Supabase, Number() pour les calculs JS
-// puis toLocaleString pour l'affichage français (espace milliers,
-// virgule décimale). 8 décimales max, on en garde 4 pour les prix
-// (les cryptos en ont rarement besoin de plus dans l'UI, l'œil lit
-// mieux 67 142,3500 que 67 142,35000000).
-function formatNumber(n: string | number | null | undefined): string {
+function formatNumber(
+  n: string | number | null | undefined,
+  maxFrac: number = 4
+): string {
   if (n === null || n === undefined) return "—";
   const v = Number(n);
   if (!Number.isFinite(v)) return "—";
   return v.toLocaleString("fr-FR", {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 4,
+    maximumFractionDigits: maxFrac,
   });
 }
 
@@ -433,4 +467,14 @@ function formatCurrency(n: string | number | null | undefined): string {
       maximumFractionDigits: 2,
     }) + " €"
   );
+}
+
+// Convertit la valeur renvoyée par la RPC trade_metrics en number
+// JS. PostgREST sérialise `numeric` en nombre JSON (pas en chaîne),
+// mais on reste défensif si le client ou une migration future change
+// le format : la fonction accepte string|number|null|undefined.
+function toNumberOrNull(v: string | number | null | undefined): number | null {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }

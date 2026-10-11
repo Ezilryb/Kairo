@@ -4,19 +4,30 @@
 // Composant ConfirmDialog — confirmation modale remplaçant le `confirm()`
 // natif du navigateur.
 //
-// Cadrage chef (Phase 9 audit round 4) :
-//   "Aligner les confirmations sur le pattern DeleteAccountConfirmation
-//    (Card + confirmation explicite), pas un `confirm()` custom qui ne
-//    ferait que déplacer le problème."
-//
 // Pourquoi un composant pur (sans bouton déclencheur interne) :
 //   - Le caller garde le contrôle de son bouton et de son état d'ouverture
-//     (useState local phase, error, pending) — exactement le pattern Phase 8
-//     DeleteAccountConfirmation, mais en version factorisée et réutilisable.
+//     (useState local phase, error, pending) — pattern de confirmation
+//     explicite, factorisé et réutilisable.
 //   - Le caller peut injecter sa propre action async (publish_trade RPC,
 //     transition_trade RPC, etc.) sans couplage au composant.
 //   - Permet d'ajouter des confirmations futures (changement de statut
 //     trade, actions admin, etc.) sans dupliquer le markup.
+//
+// Phase 10 — deux nouvelles props optionnelles :
+//   - `form?: ReactNode` : slot injecté entre la description et les
+//     boutons. Utilisé par le dialogue de clôture pour intégrer le
+//     champ de prix de sortie (sinon il faudrait une boîte séparée
+//     qui dupliquerait l'overlay/focus).
+//   - `confirmDisabled?: boolean` : désactive le bouton Confirmer
+//     tant que le formulaire intégré est invalide (ex : prix <= 0).
+//     Le caller gère son propre `disabled` (le prix > 0), ConfirmDialog
+//     n'a pas à connaître la logique métier — il applique juste
+//     `disabled` au bouton Confirmer.
+//
+// Appels existants : voir grep `ConfirmDialog` dans app/ — les
+// callers (trade-transition-button, trade-publish-button) n'utilisent
+// ni `form` ni `confirmDisabled` aujourd'hui. Les nouvelles props sont
+// optionnelles, le rendu reste identique pour eux.
 //
 // Différences avec `confirm()` natif :
 //   - Visible (le navigateur ne bloque plus le rendu)
@@ -25,7 +36,7 @@
 //     role="alertdialog" + aria-labelledby / aria-describedby pour les
 //     screen readers
 //   - Gestion d'erreur intégrée : si onConfirm throw, le dialog reste
-//     ouvert avec le message d'erreur (pas de fermeture silencieuse)
+//     ouvert avec le message d'erreur affiché (pas de fermeture silencieuse)
 //
 // Limites connues :
 //   - Pas de focus trap (à ajouter si accessibilité audit trouve des
@@ -35,7 +46,7 @@
 // =============================================================================
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button, type ButtonVariant } from "@/components/ui/Button";
 
@@ -70,6 +81,21 @@ export interface ConfirmDialogProps {
   loading?: boolean;
   /** Message d'erreur à afficher dans le dialog (ex : retourné par le RPC). */
   errorMessage?: string | null;
+  /**
+   * Slot optionnel injecté entre la description et les boutons. Typiquement
+   * un mini-formulaire intégré au dialog (ex : champ de prix de sortie).
+   * Optionnel : les callers existants ne l'utilisent pas, le rendu reste
+   * identique pour eux.
+   */
+  form?: ReactNode;
+  /**
+   * Désactive le bouton Confirmer tant que le formulaire intégré est
+   * invalide. Le caller gère son propre état (ex : prix > 0). Optionnel :
+   * défaut = false. À combiner avec `form` dans le cas du dialogue de
+   * clôture, mais reste utilisable seul (par exemple pour bloquer la
+   * confirmation tant qu'une case à cocher n'est pas cochée).
+   */
+  confirmDisabled?: boolean;
 }
 
 export function ConfirmDialog({
@@ -83,6 +109,8 @@ export function ConfirmDialog({
   onConfirm,
   loading: externalLoading,
   errorMessage,
+  form,
+  confirmDisabled = false,
 }: ConfirmDialogProps) {
   // Loading interne : true pendant l'exécution de onConfirm. Si le caller
   // passe son propre loading (externalLoading), on prend cette valeur en
@@ -114,8 +142,14 @@ export function ConfirmDialog({
   if (!open) return null;
 
   const isLoading = externalLoading ?? internalLoading;
+  // Bouton Confirmer désactivé si le caller le demande (formulaire
+  // intégré invalide) OU si une action est en cours. On combine les
+  // deux : pas la peine d'autoriser un clic pendant un pending, et
+  // pas la peine d'autoriser un clic si le form intégré est invalide.
+  const isConfirmDisabled = isLoading || confirmDisabled;
 
   const handleConfirm = async () => {
+    if (isConfirmDisabled) return;
     setInternalLoading(true);
     try {
       await onConfirm();
@@ -153,6 +187,7 @@ export function ConfirmDialog({
           >
             {description}
           </p>
+          {form ? <div data-testid="confirm-dialog-form">{form}</div> : null}
           {errorMessage ? (
             <p
               role="alert"
@@ -176,6 +211,7 @@ export function ConfirmDialog({
               size="md"
               onClick={handleConfirm}
               loading={isLoading}
+              disabled={isConfirmDisabled}
             >
               {confirmLabel}
             </Button>
