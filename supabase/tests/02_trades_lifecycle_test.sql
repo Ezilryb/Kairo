@@ -14,8 +14,8 @@
 --      → doit réussir, sans event partial_exit.
 --   5. Live + modif stop_loss à 59 s après publication → doit réussir
 --      (dans la fenêtre scalping 60 s, whitepaper §04).
---   6. Live + modif stop_loss à 61 s après publication → doit lever
---      l'exception `enforce_sl_tp_immutability` (hors fenêtre).
+--   6. Live + modif stop_loss à 70 s après publication → modif acceptée,
+--      1 trade_event 'sl_modified' postérieur de 60 s à l'event 'published'.
 --   7. publish_trade (RPC) sur draft → OK, pose published_at/opened_at
 --      via now() côté DB (pas via une valeur fournie par le client).
 --   8. publish_trade (RPC) sur trade déjà live → lève exception
@@ -56,6 +56,13 @@ on conflict (id) do nothing;
 
 select plan(14);
 
+-- Log tap_log : chaque test enveloppe son select lives_ok/throws_like
+-- dans insert into tap_log (txt) select ... pour produire une trace
+-- lisible ligne par ligne une fois le test joue, dans l'ordre des
+-- tests. Au finish(), on select txt from tap_log order by n en fin de
+-- fichier. Le plan() reste a 14 : tap_log n'est qu'un log.
+create temp table tap_log (txt text, n serial);
+
 -- ============================================================================
 -- Test 1 : draft → live + augmentation capital dans le même UPDATE → OK
 -- ============================================================================
@@ -64,8 +71,9 @@ select plan(14);
 -- (draft), donc l'augmentation est autorisée.
 -- Avec le bug (new.status = live, augmentation bloquée), ce test
 -- échouerait — c'est le bug-fix test.
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare v_trade_id uuid;
      begin
        insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status)
@@ -78,7 +86,7 @@ select lives_ok(
        update public.trades
        set status = 'live', published_at = now(), capital = 200
        where id = v_trade_id;
-     end $$ $$,
+     end $body$ $outer$,
   'draft → live avec augmentation de capital dans le même UPDATE doit réussir'
 );
 
@@ -87,8 +95,9 @@ select lives_ok(
 -- ============================================================================
 -- Le trade est déjà publié. Tenter d'augmenter capital doit lever
 -- l'exception définie dans enforce_capital_immutability.
-select throws_ok(
-  $$ do $$
+insert into tap_log (txt)
+select throws_like(
+  $outer$ do $body$
      declare v_trade_id uuid;
      begin
        insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at)
@@ -100,7 +109,7 @@ select throws_ok(
        )
        returning id into v_trade_id;
        update public.trades set capital = 200 where id = v_trade_id;
-     end $$ $$,
+     end $body$ $outer$,
   'capital ne peut pas augmenter%',
   'live + augmentation de capital seule doit lever notre exception'
 );
@@ -111,8 +120,9 @@ select throws_ok(
 -- Sortie partielle : capital 100 → 50, quantity 1 → 0.5. Le trigger
 -- log_partial_exits doit insérer une trade_event avec event_type =
 -- 'partial_exit' et old_values/new_values JSONB qui capturent avant/après.
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare
        v_trade_id uuid;
        v_event_count int;
@@ -135,7 +145,7 @@ select lives_ok(
        if v_event_count <> 1 then
          raise exception 'attendu 1 trade_event partial_exit, trouvé %', v_event_count;
        end if;
-     end $$ $$,
+     end $body$ $outer$,
   'live + diminution capital/quantity doit réussir ET créer 1 trade_event partial_exit'
 );
 
@@ -146,11 +156,13 @@ select lives_ok(
 -- log_partial_exits. Le trigger log_sl_tp_changes fire aussi mais ne crée
 -- pas d'event si SL/TP n'ont pas changé — donc au final, 0 trade_event
 -- créé par cet update.
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare
        v_trade_id uuid;
-       v_event_count int;
+       v_event_count_before int;
+       v_event_count_after int;
      begin
        insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at, notes)
        values (
@@ -161,15 +173,29 @@ select lives_ok(
          'note initiale'
        )
        returning id into v_trade_id;
+
+       -- Capture du compteur AVANT l'update notes-only. Plus robuste
+       -- qu'un test sur la valeur finale absolue : on accepte un trade
+       -- qui aurait déjà des events (par exemple un 'created' ou un
+       -- 'published' créé en amont du test), pourvu que l'update
+       -- notes-only ne crée ni ne supprime aucun event. Le passage
+       -- par before/after est la seule façon de prouver l'invariant
+       -- "update notes-only = zéro impact sur trade_events".
+       select count(*) into v_event_count_before
+         from public.trade_events
+        where trade_id = v_trade_id;
+
        update public.trades set notes = 'note mise à jour' where id = v_trade_id;
-       select count(*) into v_event_count
-       from public.trade_events
-       where trade_id = v_trade_id;
-       if v_event_count <> 0 then
-         raise exception 'attendu 0 trade_event pour update notes-only, trouvé %', v_event_count;
+
+       select count(*) into v_event_count_after
+         from public.trade_events
+        where trade_id = v_trade_id;
+
+       if v_event_count_after <> v_event_count_before then
+         raise exception 'update notes-only a touché trade_events : avant=%, après=%', v_event_count_before, v_event_count_after;
        end if;
-     end $$ $$,
-  'live + update notes-only doit réussir SANS créer de trade_event'
+     end $body$ $outer$,
+  'live + update notes-only doit réussir SANS toucher trade_events (compteur stable avant/après)'
 );
 
 -- ============================================================================
@@ -184,8 +210,9 @@ select lives_ok(
 -- Note : take_profit suit la même règle (OR dans le trigger), pas de
 -- test séparé pour TP — un test par branche du OR serait de la
 -- sur-ingénierie pour deux conditions strictement symétriques.
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare v_trade_id uuid;
      begin
        insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at, stop_loss)
@@ -198,35 +225,81 @@ select lives_ok(
        )
        returning id into v_trade_id;
        update public.trades set stop_loss = 90 where id = v_trade_id;
-     end $$ $$,
+     end $body$ $outer$,
   'modif stop_loss 59 s après publication passe (fenêtre scalping 60 s incluse)'
 );
 
 -- ============================================================================
--- Test 6 : live + modif stop_loss à 61 s après publication → lève exception
+-- Test 6 : live + modif stop_loss 70 s après publication → 1 event tardif
 -- ============================================================================
--- published_at = now() - 61 s. Le trigger évalue :
--- T > (T-61s) + 60s = T > T-1s = true → la modif est refusée.
--- Message d'exception : 'stop_loss / take_profit sont immuables...'
--- (cf. enforce_sl_tp_immutability dans la migration
--- 20260901000001_trades_sl_tp_window.sql).
-select throws_ok(
-  $$ do $$
-     declare v_trade_id uuid;
+-- La base n'applique aucun verrou sur le stop loss et le take profit
+-- (la migration 001 qui le créait n'est pas appliquée en prod, et 029
+-- le supprime de toute base reconstruite depuis le dépôt). Aucune
+-- exception n'est levée par la base sur une modification tardive. La
+-- modif passe, et un trade_event 'sl_modified' est historisé plus de
+-- 60 s après l'event 'published'.
+--
+-- Le test ne s'appuie pas sur has_late_sl_tp_modification (n'existe
+-- qu'à partir de la migration 030) : il lit trade_events directement.
+-- L'assertion sur proof_of_performance sera ajoutée dans le test pgTAP
+-- de la 030, après création de la fonction utilitaire.
+insert into tap_log (txt)
+select lives_ok(
+  $outer$ do $body$
+     declare
+       v_trade_id uuid;
+       v_event_count_late int;
      begin
        insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at, stop_loss)
        values (
          '00000000-0000-0000-0000-000000000002'::uuid,
          (select id from public.instruments where symbol = 'TESTUSD2'),
          'long', 100, 1, 100, 'live',
-         now() - interval '61 seconds', now() - interval '61 seconds',
+         now() - interval '70 seconds', now() - interval '70 seconds',
          95
        )
        returning id into v_trade_id;
-       update public.trades set stop_loss = 90 where id = v_trade_id;
-     end $$ $$,
-  'stop_loss / take_profit sont immuables%',
-  'modif stop_loss 61 s après publication doit lever notre exception (fenêtre expirée)'
+
+       -- Recule l'event 'published' de 70 s pour le sortir de la fenêtre
+       -- scalping 60 s. Le trigger forbid_trade_events_mutation lit le
+       -- GUC app.allow_trade_events_mutation et lève sinon
+       -- 'trade_events est immuable : UPDATE/DELETE interdits'. On pose
+       -- le flag, on recule l'event, on remet le flag. La transaction
+       -- courante est ouverte par le `begin;` en tête de ce fichier et
+       -- fermée par le `rollback;` final, donc le GUC est local au fichier.
+       perform set_config('app.allow_trade_events_mutation', 'true', true);
+       update public.trade_events
+          set created_at = now() - interval '70 seconds'
+        where trade_id = v_trade_id
+          and event_type = 'published';
+       perform set_config('app.allow_trade_events_mutation', 'false', true);
+
+       -- Modification tardive acceptée par la base (aucun verrou
+       -- SL/TP n'est appliqué).
+       update public.trades
+          set stop_loss = 90
+        where id = v_trade_id;
+
+       -- Vérifie qu'exactement 1 event 'sl_modified' a été créé APRÈS
+       -- l'event 'published' + 60 s. La requête lit trade_events
+       -- directement, ce qui reste correct (has_late_sl_tp_modification
+       -- n'existe qu'après la migration 030).
+       select count(*) into v_event_count_late
+         from public.trade_events e
+        where e.trade_id = v_trade_id
+          and e.event_type = 'sl_modified'
+          and e.created_at > coalesce(
+            (select e2.created_at from public.trade_events e2
+              where e2.trade_id = v_trade_id and e2.event_type = 'published'
+              order by e2.created_at asc limit 1),
+            'infinity'::timestamptz
+          ) + interval '60 seconds';
+
+       if v_event_count_late <> 1 then
+         raise exception 'attendu 1 event sl_modified tardif, trouvé %', v_event_count_late;
+       end if;
+     end $body$ $outer$,
+  'modif stop_loss 70 s après publication acceptée, 1 event sl_modified tardif enregistré'
 );
 
 -- ============================================================================
@@ -252,8 +325,9 @@ select throws_ok(
 -- l'appel via set_config(..., true) (true = local à la transaction).
 -- Sans ça, ce test donnerait un faux négatif visible — gênant mais
 -- détectable. Pire pour le test 8 (cf. commentaire dédié).
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare
        v_trade_id uuid;
        v_published public.trades;
@@ -293,7 +367,7 @@ select lives_ok(
          raise exception 'opened_at (%) doit être >= à t_before (%)',
            v_published.opened_at, v_t_before;
        end if;
-     end $$ $$,
+     end $body$ $outer$,
   'publish_trade (RPC) sur draft pose status=live + published_at/opened_at via now() DB'
 );
 
@@ -315,8 +389,9 @@ select lives_ok(
 -- test manquant. D'où le set_config explicite ci-dessous, qui rend
 -- le test authentique : user_id matche bien, seul status = 'draft'
 -- filtre, et c'est ÇA qui doit faire échouer le WHERE.
-select throws_ok(
-  $$ do $$
+insert into tap_log (txt)
+select throws_like(
+  $outer$ do $body$
      declare v_trade_id uuid;
      begin
        insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at)
@@ -336,7 +411,7 @@ select throws_ok(
          true
        );
        perform public.publish_trade(v_trade_id);
-     end $$ $$,
+     end $body$ $outer$,
   'Trade introuvable%',
   'publish_trade (RPC) sur trade déjà live doit lever notre exception (pas de republication)'
 );
@@ -348,8 +423,9 @@ select throws_ok(
 --   - status passe à 'closed'
 --   - closed_at est posé à now() (non NULL, et >= t_before)
 --   - 1 trade_event de type 'closed' est créé avec old/new status
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare
        v_trade_id uuid;
        v_result public.trades;
@@ -370,7 +446,7 @@ select lives_ok(
          true
        );
        v_t_before := now();
-       select * into v_result from public.transition_trade(v_trade_id, 'closed'::public.trade_status);
+       select * into v_result from public.transition_trade(v_trade_id, 'closed'::public.trade_status, 100);
        if v_result.status <> 'closed' then
          raise exception 'status doit être closed, trouvé %', v_result.status;
        end if;
@@ -387,7 +463,7 @@ select lives_ok(
        if v_event_count <> 1 then
          raise exception 'attendu 1 trade_event closed, trouvé %', v_event_count;
        end if;
-     end $$ $$,
+     end $body$ $outer$,
   'transition_trade live → closed pose status + closed_at + event closed'
 );
 
@@ -400,8 +476,9 @@ select lives_ok(
 --   - 1 trade_event de type 'reactivated' est créé
 -- C'est la transition "REACTIVÉ" du whitepaper §04 — pas un statut
 -- à part, juste forgotten qui redevient live.
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare
        v_trade_id uuid;
        v_result public.trades;
@@ -434,7 +511,7 @@ select lives_ok(
        if v_event_count <> 1 then
          raise exception 'attendu 1 trade_event reactivated, trouvé %', v_event_count;
        end if;
-     end $$ $$,
+     end $body$ $outer$,
   'transition_trade forgotten → live pose status=live + event reactivated'
 );
 
@@ -444,8 +521,9 @@ select lives_ok(
 -- Transition interdite : pour archiver, il faut passer par closed
 -- d'abord (LIVE → CLOSED → ARCHIVED). Le RPC doit refuser
 -- explicitement, pas passer en silence.
-select throws_ok(
-  $$ do $$
+insert into tap_log (txt)
+select throws_like(
+  $outer$ do $body$
      declare v_trade_id uuid;
      begin
        insert into public.trades (user_id, instrument_id, direction, entry_price, quantity, capital, status, published_at, opened_at)
@@ -462,7 +540,7 @@ select throws_ok(
          true
        );
        perform public.transition_trade(v_trade_id, 'archived'::public.trade_status);
-     end $$ $$,
+     end $body$ $outer$,
   'Transition non autorisée%',
   'transition_trade live → archived doit lever (faut passer par closed)'
 );
@@ -480,8 +558,9 @@ select throws_ok(
 -- Note : SECURITY DEFINER bypasse la RLS, donc pas besoin de
 -- set_config pour auth.uid() ici — le RPC s'exécute avec les droits
 -- du propriétaire de la fonction, peu importe qui appelle.
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare
        v_trade_id uuid;
        v_count int;
@@ -511,7 +590,7 @@ select lives_ok(
        if v_event_count <> 1 then
          raise exception 'attendu 1 trade_event marked_forgotten, trouvé %', v_event_count;
        end if;
-     end $$ $$,
+     end $body$ $outer$,
   'mark_forgotten_trades bascule les trades live+old (status=forgotten + event)'
 );
 
@@ -527,8 +606,9 @@ select lives_ok(
 -- le status du trade serait 'forgotten' → les 2 assertions sautent.
 -- Le test 12 a déjà oublié son propre trade (donc le WHERE ne le
 -- matche plus, status = 'forgotten'), on est dans un état propre.
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare
        v_trade_id uuid;
        v_count int;
@@ -551,7 +631,7 @@ select lives_ok(
        if v_status <> 'live' then
          raise exception 'trade live+recent ne doit pas être oublié, status = %', v_status;
        end if;
-     end $$ $$,
+     end $body$ $outer$,
   'mark_forgotten_trades sur trade live+recent : compteur 0 et status reste live'
 );
 
@@ -574,8 +654,9 @@ select lives_ok(
 -- last_activity_at et on vérifie qu'il n'a pas bougé. Tolérance
 -- ±1s pour la résolution de now() dans la même transaction
 -- (vraisemblablement 0s en pratique, mais on reste défensif).
+insert into tap_log (txt)
 select lives_ok(
-  $$ do $$
+  $outer$ do $body$
      declare
        v_trade_id uuid;
        v_last_activity_before timestamptz;
@@ -602,9 +683,12 @@ select lives_ok(
          raise exception 'last_activity_at a bougé de % secondes (avant=%, après=%) — log_sl_tp_changes a écrasé la date d''inactivité',
            v_diff_seconds, v_last_activity_before, v_last_activity_after;
        end if;
-     end $$ $$,
+     end $body$ $outer$,
   'mark_forgotten_trades préserve last_activity_at (pas d''écrasement silencieux par log_sl_tp_changes)'
 );
 
 select * from finish();
+
+-- Affichage final du journal (lecture humaine post-finish()) :
+select txt from tap_log order by n;
 rollback;
